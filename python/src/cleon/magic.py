@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - fallback when IPython is missing
             self.data = data
 
 
-from ._cleon import run as cleon_run
+from ._cleon import run as cleon_run  # type: ignore[import-not-found]
 
 DisplayMode = str
 _SESSION: "SharedSession | None" = None
@@ -63,7 +63,7 @@ class CodexRequest:
     context_chars: int | None
     mode: str
     emit_events: bool
-    runtime: str
+    runtime: Mapping[str, Any]
 
 
 class SharedSession:
@@ -101,7 +101,7 @@ class SharedSession:
     def _read_lines(self) -> Iterable[str]:
         assert self.proc is not None
         if self.proc.stdout is None:
-            return []
+            return
         while True:
             line = self.proc.stdout.readline()
             if line == "":
@@ -112,7 +112,7 @@ class SharedSession:
         self,
         prompt: str,
         on_event: Callable[[Any], None] | None = None,
-        on_approval: Callable[[dict[str, Any]], str] | None = None,
+        on_approval: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> tuple[Any, list[Any]]:
         with _SESSION_LOCK:
             self.ensure_started()
@@ -253,12 +253,9 @@ def _worker_loop() -> None:
             _process_codex_request(request)
         except queue.Empty:
             continue
-        except Exception as e:
+        except Exception:
             # Log error but keep worker running
-            try:
-                _log(f"Worker error: {e}")
-            except Exception:
-                pass
+            pass
 
 
 def _start_worker_thread() -> None:
@@ -320,7 +317,7 @@ def _process_codex_request(request: CodexRequest) -> None:
         # Send to codex
         result, events = session.send(
             full_prompt,
-            on_event=_chain(_log_event),
+            on_event=_log_event,
             on_approval=_prompt_approval,
         )
 
@@ -346,7 +343,6 @@ def _process_codex_request(request: CodexRequest) -> None:
         # Show error in cell
         error_msg = f"❌ Codex error: {e}"
         update_display(error_msg, display_id=request.display_id)
-        _log(f"Request processing error: {e}")
 
 
 def register_magic(
@@ -409,7 +405,7 @@ def register_magic(
         if prompt.startswith("/"):
             cmd, _, rest = prompt.partition(" ")
             cmd = cmd.lower()
-            progress = _Progress(render=stream, cancel=lambda: _cancel_session(runtime))
+            progress = _Progress(render=stream, cancel=lambda: _stop_session())
 
             # One-shot prompt (fresh process)
             if cmd in {"/fresh", "/once"}:
@@ -501,12 +497,11 @@ def register_magic(
             return None
 
         # Synchronous mode: execute immediately
-        progress = _Progress(render=stream, cancel=lambda: _cancel_session(runtime))
+        progress = _Progress(render=stream, cancel=lambda: _stop_session())
 
         # Build prompt with proper order: template -> context -> user prompt
         session = _shared_session(runtime)
         parts = []
-        original_prompt = prompt  # Save for conversation log
 
         # 1. Template (first turn only)
         if session.first_turn:
@@ -661,6 +656,11 @@ class _Progress:
         if self._thread is not None:
             self._thread.start()
 
+    def _render_content(self, message: str, spinner: bool = False) -> str:
+        """Render content with optional spinner."""
+        style = "color: #666; font-family: monospace;"
+        return f'<div style="{style}">{message}</div>'
+
     def update(self, event: Any) -> None:
         if self.handle is None:
             return
@@ -802,9 +802,9 @@ def _resolve_cleon_binary(explicit: str | None) -> str | None:
         if not target_dir.exists():
             continue
         for profile in ("release", "debug"):
-            candidate = target_dir / profile / "cleon"
-            if candidate.is_file():
-                candidates.append(str(candidate))
+            candidate_path = target_dir / profile / "cleon"
+            if candidate_path.is_file():
+                candidates.append(str(candidate_path))
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -904,10 +904,9 @@ def _get_notebook_name() -> str | None:
             nb_path = ip.user_ns["__vsc_ipynb_file__"]
             return Path(nb_path).stem
         # Try Jupyter classic/lab
-        from jupyter_client import find_connection_file
+        from jupyter_client import find_connection_file  # type: ignore[import-not-found]
 
-        connection_file = find_connection_file()
-        kernel_id = connection_file.split("-", 1)[1].split(".")[0]
+        find_connection_file()
         # This is a fallback - not perfect but works in many cases
         for nb_file in Path.cwd().glob("*.ipynb"):
             return nb_file.stem
@@ -978,7 +977,7 @@ def _maybe_prompt_followup(
     reply = reply.strip()
     resp_progress = _Progress(
         render=True if mode != "none" else False,
-        cancel=lambda: _cancel_session(runtime),
+        cancel=lambda: _stop_session(),
     )
     try:
         result, events = _shared_session(runtime).send(
@@ -1083,7 +1082,7 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
 
         for key, (decision, label) in options.items():
             btn = widgets.Button(description=f"{key}. {label}", button_style="primary")
-            btn.on_click(lambda _b, d=decision, l=label: handler(d, l))
+            btn.on_click(lambda _b, d=decision, lbl=label: handler(d, lbl))
             buttons.append(btn)
 
         display(

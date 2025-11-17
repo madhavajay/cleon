@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._cleon import auth, run  # Re-export PyO3 bindings
+from ._cleon import auth, run  # type: ignore[import-not-found]  # Re-export PyO3 bindings
 from .magic import (
     load_ipython_extension,
     register_codex_magic,
@@ -20,4 +20,5 @@ __all__ = [
     "use",
     "autoroute",
     "load_ipython_extension",
+    "history_magic",
 ]
