@@ -9,7 +9,8 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-export UV_PROJECT_ENVIRONMENT="$ROOT/.venv"
+export UV_VENV_CLEAR=1
+export UV_PROJECT_ENVIRONMENT="$ROOT/.lint"
 uv venv
 
 uv pip install -e "$PY_ROOT"
@@ -21,7 +22,7 @@ echo "Running ruff format..."
 uv run ruff format src
 
 echo "Running ruff check..."
-uv run ruff check src
+uv run ruff check --fix src
 
 echo "Running mypy..."
 uv run mypy src

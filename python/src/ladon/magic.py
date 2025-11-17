@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Callable, Iterable, Mapping, Union
+from typing import Any, Callable, Iterable, Mapping
 
 try:  # pragma: no cover - optional import when IPython is available
     from IPython import get_ipython  # type: ignore
@@ -327,7 +327,10 @@ def _extract_final_message(result: Any) -> str:
             for ev in msgs:
                 if isinstance(ev, Mapping):
                     item = ev.get("item")
-                    if isinstance(item, Mapping) and item.get("type") == "agent_message":
+                    if (
+                        isinstance(item, Mapping)
+                        and item.get("type") == "agent_message"
+                    ):
                         text = item.get("text")
                         if isinstance(text, str) and text.strip():
                             return text
@@ -414,7 +417,7 @@ def _summarize_event(event: Any) -> str:
                 item = event["item"]
                 item_type = item.get("type")
                 if item_type == "reasoning":
-                    return f"reasoning: {str(item.get('text',''))[:80]}"
+                    return f"reasoning: {str(item.get('text', ''))[:80]}"
                 if item_type == "command_execution":
                     cmd = item.get("command") or ""
                     status = item.get("status") or "running"
@@ -544,7 +547,10 @@ def _log_events(events: Iterable[Any]) -> None:
     for ev in events:
         _log_event(ev)
 
-def _maybe_prompt_followup(runtime: Mapping[str, Any], mode: DisplayMode, progress: "_Progress") -> None:
+
+def _maybe_prompt_followup(
+    runtime: Mapping[str, Any], mode: DisplayMode, progress: "_Progress"
+) -> None:
     # Heuristic: if last result text looks like a question or request, offer a reply
     text = progress.last_result_text.strip()
     if not text or "?" not in text:
@@ -579,7 +585,9 @@ def _prompt_user_input(question: str) -> str | None:
             )
         ]
         text = widgets.Text(
-            placeholder="Type response…", description="codex:", layout=widgets.Layout(width="60%")
+            placeholder="Type response…",
+            description="codex:",
+            layout=widgets.Layout(width="60%"),
         )
         button = widgets.Button(description="Send", button_style="primary")
         feedback = widgets.Output()
@@ -609,7 +617,9 @@ def _prompt_user_input(question: str) -> str | None:
 
     # Fallback to stdin
     try:
-        return input(f"\nAGENT REQUEST:\n> {question}\n↪ Reply (press Enter to skip): ").strip()
+        return input(
+            f"\nAGENT REQUEST:\n> {question}\n↪ Reply (press Enter to skip): "
+        ).strip()
     except Exception:
         return None
 

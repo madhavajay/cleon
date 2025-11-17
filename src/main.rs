@@ -8,7 +8,9 @@ use codex_app_server_protocol::AuthMode;
 use codex_core::auth::{self, enforce_login_restrictions, login_with_api_key, logout};
 use codex_core::config::{Config, ConfigOverrides};
 use codex_core::default_client::{self, SetOriginatorError};
-use codex_core::protocol::{AskForApproval, Event, EventMsg, Op, ReviewDecision, SandboxPolicy, SessionSource};
+use codex_core::protocol::{
+    AskForApproval, Event, EventMsg, Op, ReviewDecision, SandboxPolicy, SessionSource,
+};
 use codex_core::{AuthManager, CodexAuth, ConversationManager, NewConversation};
 use codex_exec::event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use codex_exec::exec_events::{ThreadEvent, ThreadItemDetails, Usage};
