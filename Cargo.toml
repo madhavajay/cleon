@@ -1,0 +1,18 @@
+[package]
+name = "ladon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+codex-core = { path = "codex/codex-rs/core" }
+codex-login = { path = "codex/codex-rs/login" }
+codex-otel = { path = "codex/codex-rs/otel" }
+codex-protocol = { path = "codex/codex-rs/protocol" }
+codex-app-server-protocol = { path = "codex/codex-rs/app-server-protocol" }
+codex-exec = { path = "codex/codex-rs/exec" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

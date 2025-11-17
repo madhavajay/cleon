@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is required to run ladon." >&2
+  exit 1
+fi
+
+PROFILE_FLAG=("--profile" "dev")
+if [ "${LADON_RELEASE:-0}" = "1" ]; then
+  PROFILE_FLAG=("--release")
+elif [ -n "${LADON_CARGO_PROFILE:-}" ]; then
+  PROFILE_FLAG=("--profile" "$LADON_CARGO_PROFILE")
+fi
+
+exec cargo run \
+  --manifest-path "$ROOT_DIR/Cargo.toml" \
+  "${PROFILE_FLAG[@]}" \
+  --bin ladon \
+  -- "$@"

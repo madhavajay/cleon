@@ -1,0 +1,13 @@
+[package]
+name = "ladon"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ladon"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

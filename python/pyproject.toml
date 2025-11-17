@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ladon"
+version = "0.1.0"
+description = "PyO3 bindings for the ladon CLI"
+requires-python = ">=3.9"
+dependencies = ["ipython>=8.0"]
+authors = [
+    { name = "Ladon Contributors" },
+    { name = "Madhava Jay", email = "me@madhavajay.com" },
+]
+keywords = ["codex", "ladon", "ipython"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+manifest-path = "ladon/Cargo.toml"
+module-name = "ladon._ladon"
+python-source = "src"
+python-packages = ["ladon"]
+include = ["src/ladon/py.typed", "src/ladon/_ladon.pyi"]
