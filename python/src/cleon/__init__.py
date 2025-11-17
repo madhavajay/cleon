@@ -1,8 +1,8 @@
-"""Python helpers for the ladon CLI bindings."""
+"""Python helpers for the codex CLI bindings."""
 
 from __future__ import annotations
 
-from ._ladon import auth, run  # Re-export PyO3 bindings
+from ._cleon import auth, run  # Re-export PyO3 bindings
 from .magic import (
     load_ipython_extension,
     register_codex_magic,

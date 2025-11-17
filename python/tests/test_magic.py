@@ -1,6 +1,6 @@
 import os
 
-from ladon.magic import SharedSession
+from cleon.magic import SharedSession
 
 
 class DummyProc:

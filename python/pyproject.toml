@@ -3,21 +3,18 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "ladon"
+name = "cleon"
 version = "0.1.0"
-description = "PyO3 bindings for the ladon CLI"
+description = "A Genetic Dynasty of Agentic Clones for Jupyter Notebooks"
 requires-python = ">=3.9"
 dependencies = ["ipython>=8.0"]
-authors = [
-    { name = "Ladon Contributors" },
-    { name = "Madhava Jay", email = "me@madhavajay.com" },
-]
-keywords = ["codex", "ladon", "ipython"]
+authors = [{ name = "Madhava Jay", email = "me@madhavajay.com" }]
+keywords = ["codex", "cleon", "ipython"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-manifest-path = "ladon/Cargo.toml"
-module-name = "ladon._ladon"
+manifest-path = "cleon/Cargo.toml"
+module-name = "cleon._cleon"
 python-source = "src"
-python-packages = ["ladon"]
-include = ["src/ladon/py.typed", "src/ladon/_ladon.pyi"]
+python-packages = ["cleon"]
+include = ["src/cleon/py.typed", "src/cleon/_cleon.pyi"]

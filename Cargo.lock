@@ -617,6 +617,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
+name = "cleon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-app-server-protocol",
+ "codex-core",
+ "codex-exec",
+ "codex-login",
+ "codex-otel",
+ "codex-protocol",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "codex-app-server-protocol"
 version = "0.0.0"
 dependencies = [
@@ -2214,24 +2232,6 @@ dependencies = [
  "windows-sys 0.60.2",
  "zbus",
  "zeroize",
-]
-
-[[package]]
-name = "ladon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "codex-app-server-protocol",
- "codex-core",
- "codex-exec",
- "codex-login",
- "codex-otel",
- "codex-protocol",
- "futures",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

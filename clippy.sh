@@ -9,8 +9,8 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo fmt -p ladon
-cargo fmt --manifest-path "$ROOT/python/ladon/Cargo.toml"
+cargo fmt -p cleon
+cargo fmt --manifest-path "$ROOT/python/cleon/Cargo.toml"
 
-cargo clippy -p ladon --all-targets --all-features -- -D warnings
-cargo clippy --manifest-path "$ROOT/python/ladon/Cargo.toml" --all-targets --all-features -- -D warnings
+cargo clippy -p cleon --all-targets --all-features -- -D warnings
+cargo clippy --manifest-path "$ROOT/python/cleon/Cargo.toml" --all-targets --all-features -- -D warnings

@@ -1,10 +1,10 @@
 [package]
-name = "ladon"
+name = "cleon"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "ladon"
+name = "cleon"
 crate-type = ["cdylib"]
 
 [dependencies]

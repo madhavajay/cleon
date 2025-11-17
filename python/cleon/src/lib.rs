@@ -9,25 +9,25 @@ use serde_json::Value as JsonValue;
 use std::env;
 use std::process::{Command, Stdio};
 
-fn ladon_binary() -> String {
-    env::var("LADON_BIN").unwrap_or_else(|_| "ladon".to_string())
+fn codex_binary() -> String {
+    env::var("CLEON_BIN").unwrap_or_else(|_| "codex".to_string())
 }
 
 fn run_command(args: &[&str]) -> PyResult<std::process::Output> {
-    let mut cmd = Command::new(ladon_binary());
+    let mut cmd = Command::new(codex_binary());
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
     cmd.output()
-        .map_err(|e| PyRuntimeError::new_err(format!("failed to execute ladon: {e}")))
+        .map_err(|e| PyRuntimeError::new_err(format!("failed to execute codex: {e}")))
         .and_then(|output| {
             if output.status.success() {
                 Ok(output)
             } else {
                 Err(PyRuntimeError::new_err(format!(
-                    "ladon exited with {status}",
+                    "codex exited with {status}",
                     status = output.status
                 )))
             }
@@ -68,14 +68,14 @@ fn parse_cli_output(stdout: &str, capture_events: bool) -> PyResult<(JsonValue, 
     match final_result {
         Some(result) => Ok((result, events)),
         None => Err(PyRuntimeError::new_err(
-            "ladon output missing turn.result payload",
+            "codex output missing turn.result payload",
         )),
     }
 }
 
 #[pyfunction(signature = (provider=None))]
 fn auth(provider: Option<&str>) -> PyResult<()> {
-    if env::var("LADON_SKIP_AUTH").as_deref() == Ok("1") {
+    if env::var("CLEON_SKIP_AUTH").as_deref() == Ok("1") {
         return Ok(());
     }
     let requested = provider.unwrap_or("codex");
@@ -96,9 +96,9 @@ fn run(
     json_events: Option<bool>,
     json_result: Option<bool>,
 ) -> PyResult<(PyObject, PyObject)> {
-    if let Ok(fake) = env::var("LADON_FAKE_RESULT") {
+    if let Ok(fake) = env::var("CLEON_FAKE_RESULT") {
         let parsed: JsonValue = serde_json::from_str(&fake)
-            .map_err(|e| PyRuntimeError::new_err(format!("invalid LADON_FAKE_RESULT: {e}")))?;
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid CLEON_FAKE_RESULT: {e}")))?;
         let result_py = json_to_py(py, &parsed)?;
         let events_py = py.None();
         return Ok((result_py, events_py));
@@ -131,7 +131,7 @@ fn run(
 }
 
 #[pymodule]
-fn _ladon(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _cleon(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(auth, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     Ok(())

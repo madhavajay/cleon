@@ -1,12 +1,15 @@
-"""IPython cell magic helpers for ladon."""
+"""IPython cell magic helpers for cleon."""
 
 from __future__ import annotations
 
 import json
 import itertools
 import os
+import queue
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,13 +18,16 @@ from typing import Any, Callable, Iterable, Mapping
 
 try:  # pragma: no cover - optional import when IPython is available
     from IPython import get_ipython  # type: ignore
-    from IPython.display import Markdown, display, HTML  # type: ignore
+    from IPython.display import Markdown, display, HTML, update_display  # type: ignore
 except Exception:  # pragma: no cover - fallback when IPython is missing
 
     def get_ipython():  # type: ignore
         return None
 
     def display(*_: object, **__: object) -> None:  # type: ignore
+        pass
+
+    def update_display(*_: object, **__: object) -> None:  # type: ignore
         pass
 
     class HTML:  # type: ignore
@@ -33,7 +39,7 @@ except Exception:  # pragma: no cover - fallback when IPython is missing
             self.data = data
 
 
-from ._ladon import run as ladon_run
+from ._cleon import run as cleon_run
 
 DisplayMode = str
 _SESSION: "SharedSession | None" = None
@@ -41,10 +47,27 @@ _LOG_PATH: str | None = None
 _CONVERSATION_LOG_PATH: str | None = None
 _CANCEL_PATH: str | None = None
 _CONTEXT_TRACKER: "ContextTracker | None" = None
+_ASYNC_MODE: bool = False
+_CODEX_QUEUE: "queue.Queue[CodexRequest | None] | None" = None
+_WORKER_THREAD: threading.Thread | None = None
+_SESSION_LOCK = threading.Lock()
+
+
+@dataclass
+class CodexRequest:
+    """Request to process a %%codex cell in background."""
+
+    prompt: str
+    display_id: str
+    context_cells: int | None
+    context_chars: int | None
+    mode: str
+    emit_events: bool
+    runtime: str
 
 
 class SharedSession:
-    """Lightweight persistent ladon CLI process for multi-turn use."""
+    """Lightweight persistent codex CLI process for multi-turn use."""
 
     def __init__(self, binary: str, env: Mapping[str, str] | None = None) -> None:
         self.binary = binary
@@ -91,61 +114,62 @@ class SharedSession:
         on_event: Callable[[Any], None] | None = None,
         on_approval: Callable[[dict[str, Any]], str] | None = None,
     ) -> tuple[Any, list[Any]]:
-        self.ensure_started()
-        assert self.proc is not None
-        # Drain any leftover stdout before sending a new prompt
-        self._drain_stdout()
-        if self.proc.stdin is None:
-            raise RuntimeError("ladon session stdin unavailable")
-        # Interactive mode uses read_line() which stops at first \n
-        # Replace newlines with special marker so entire prompt is on one line
-        single_line_prompt = prompt.replace("\n", " ⏎ ")
-        self.proc.stdin.write(single_line_prompt + "\n")
-        self.proc.stdin.flush()
-        # Mark that we've sent at least one turn
-        self.first_turn = False
+        with _SESSION_LOCK:
+            self.ensure_started()
+            assert self.proc is not None
+            # Drain any leftover stdout before sending a new prompt
+            self._drain_stdout()
+            if self.proc.stdin is None:
+                raise RuntimeError("cleon session stdin unavailable")
+            # Interactive mode uses read_line() which stops at first \n
+            # Replace newlines with special marker so entire prompt is on one line
+            single_line_prompt = prompt.replace("\n", " ⏎ ")
+            self.proc.stdin.write(single_line_prompt + "\n")
+            self.proc.stdin.flush()
+            # Mark that we've sent at least one turn
+            self.first_turn = False
 
-        events: list[Any] = []
-        final: Any | None = None
-        for line in self._read_lines():
-            try:
-                parsed = json.loads(line)
-            except Exception:
-                continue
-            events.append(parsed)
-            if parsed.get("type") == "approval.request":
-                if on_approval is not None:
-                    decision = on_approval(parsed)
-                    if decision:
-                        if self.proc.stdin is None:
-                            raise RuntimeError("ladon session stdin unavailable")
-                            # pragma: no cover
-                        self.proc.stdin.write(decision + "\n")
-                        self.proc.stdin.flush()
-                        continue
-            if on_event is not None:
+            events: list[Any] = []
+            final: Any | None = None
+            for line in self._read_lines():
                 try:
-                    on_event(parsed)
+                    parsed = json.loads(line)
                 except Exception:
-                    pass
-            if (
-                isinstance(parsed, dict)
-                and parsed.get("type") == "turn.result"
-                and "result" in parsed
-            ):
-                final = parsed["result"]
-                break
+                    continue
+                events.append(parsed)
+                if parsed.get("type") == "approval.request":
+                    if on_approval is not None:
+                        decision = on_approval(parsed)
+                        if decision:
+                            if self.proc.stdin is None:
+                                raise RuntimeError("cleon session stdin unavailable")
+                                # pragma: no cover
+                            self.proc.stdin.write(decision + "\n")
+                            self.proc.stdin.flush()
+                            continue
+                if on_event is not None:
+                    try:
+                        on_event(parsed)
+                    except Exception:
+                        pass
+                if (
+                    isinstance(parsed, dict)
+                    and parsed.get("type") == "turn.result"
+                    and "result" in parsed
+                ):
+                    final = parsed["result"]
+                    break
 
-        # Drain any trailing output the process may emit after turn.result
-        self._drain_stdout()
-        # Give the process a moment to flush any final output
-        time.sleep(0.1)
-        # Drain one more time to be sure
-        self._drain_stdout()
+            # Drain any trailing output the process may emit after turn.result
+            self._drain_stdout()
+            # Give the process a moment to flush any final output
+            time.sleep(0.1)
+            # Drain one more time to be sure
+            self._drain_stdout()
 
-        if final is None:
-            raise RuntimeError("ladon output missing turn.result payload")
-        return final, events
+            if final is None:
+                raise RuntimeError("cleon output missing turn.result payload")
+            return final, events
 
     def _drain_stdout(self) -> None:
         """Best-effort drain of any pending stdout to avoid bleed between turns."""
@@ -192,6 +216,7 @@ def use(
     context_changes: bool = False,
     context_cells: int | None = None,
     context_chars: int | None = None,
+    async_mode: bool = False,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
@@ -210,8 +235,118 @@ def use(
         context_changes=context_changes,
         context_cells=context_cells,
         context_chars=context_chars,
+        async_mode=async_mode,
         ipython=ipython,
     )
+
+
+def _worker_loop() -> None:
+    """Background worker that processes codex requests from queue."""
+    global _CODEX_QUEUE
+    while True:
+        try:
+            if _CODEX_QUEUE is None:
+                break
+            request = _CODEX_QUEUE.get(timeout=0.5)
+            if request is None:  # Poison pill to stop worker
+                break
+            _process_codex_request(request)
+        except queue.Empty:
+            continue
+        except Exception as e:
+            # Log error but keep worker running
+            try:
+                _log(f"Worker error: {e}")
+            except Exception:
+                pass
+
+
+def _start_worker_thread() -> None:
+    """Start background worker thread if not already running."""
+    global _CODEX_QUEUE, _WORKER_THREAD
+    if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
+        return
+    if _CODEX_QUEUE is None:
+        _CODEX_QUEUE = queue.Queue()
+    _WORKER_THREAD = threading.Thread(
+        target=_worker_loop, daemon=True, name="codex-worker"
+    )
+    _WORKER_THREAD.start()
+
+
+def _stop_worker_thread() -> None:
+    """Stop background worker thread cleanly."""
+    global _CODEX_QUEUE, _WORKER_THREAD
+    if _CODEX_QUEUE is not None:
+        _CODEX_QUEUE.put(None)  # Poison pill
+    if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
+        _WORKER_THREAD.join(timeout=2.0)
+    _CODEX_QUEUE = None
+    _WORKER_THREAD = None
+
+
+def _process_codex_request(request: CodexRequest) -> None:
+    """Process a single codex request and update display."""
+    try:
+        # Build full prompt with template/context
+        session = _shared_session(request.runtime)
+        parts = []
+
+        # 1. Template (first turn only)
+        if session.first_turn:
+            template = _load_template()
+            if template:
+                _log_template(template)
+                parts.append(template)
+
+        # 2. Context (if enabled)
+        if _CONTEXT_TRACKER is not None:
+            context_block = _build_context_block(
+                request.context_cells, request.context_chars
+            )
+            if context_block:
+                _log_context_block(context_block)
+                parts.append(f"Context (changed cells):\n{context_block}")
+
+        # 3. User prompt
+        if parts:
+            parts.append(f"User prompt:\n{request.prompt}")
+            full_prompt = "\n\n".join(parts)
+        else:
+            full_prompt = request.prompt
+
+        _log_prompt(full_prompt)
+
+        # Send to codex
+        result, events = session.send(
+            full_prompt,
+            on_event=_chain(_log_event),
+            on_approval=_prompt_approval,
+        )
+
+        # Extract response and log
+        response = _extract_final_message(result)
+        _log_conversation(full_prompt, response)
+
+        # Update cell display with result
+        if request.mode != "none":
+            if request.mode == "markdown" or (request.mode == "auto" and response):
+                update_display(
+                    Markdown(response or "(no response)"), display_id=request.display_id
+                )
+            else:
+                update_display(
+                    response or "(no response)", display_id=request.display_id
+                )
+
+        if request.emit_events:
+            update_display(events, display_id=f"{request.display_id}-events")
+
+    except Exception as e:
+        # Show error in cell
+        error_msg = f"❌ Codex error: {e}"
+        update_display(error_msg, display_id=request.display_id)
+        _log(f"Request processing error: {e}")
 
 
 def register_magic(
@@ -229,9 +364,10 @@ def register_magic(
     context_changes: bool = False,
     context_cells: int | None = None,
     context_chars: int | None = None,
+    async_mode: bool = False,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
-    """Register the ``%%name`` cell magic for ladon."""
+    """Register the ``%%name`` cell magic for cleon."""
 
     ip = _ensure_ipython(ipython)
     normalized = name.lower()
@@ -241,12 +377,25 @@ def register_magic(
             "display_mode must be one of 'auto', 'markdown', 'text', or 'none'"
         )
 
-    runtime = _ensure_ladon_runtime(binary=binary, extra_env=env)
+    runtime = _ensure_cleon_runtime(binary=binary, extra_env=env)
     _configure_logging(log_path)
     _configure_conversation_log()
     _configure_cancel(cancel_path)
     if context_changes:
         _configure_context()
+
+    # Configure async mode
+    global _ASYNC_MODE
+    _ASYNC_MODE = async_mode
+    if async_mode:
+        _start_worker_thread()
+        # Register cleanup handler for kernel shutdown
+        try:
+            import atexit
+
+            atexit.register(_stop_worker_thread)
+        except Exception:
+            pass
 
     emit_events = show_events or debug
 
@@ -256,12 +405,11 @@ def register_magic(
             print("No prompt provided.")
             return None
 
-        progress = _Progress(render=stream, cancel=lambda: _cancel_session(runtime))
-
         # Command prefixes for mode control
         if prompt.startswith("/"):
             cmd, _, rest = prompt.partition(" ")
             cmd = cmd.lower()
+            progress = _Progress(render=stream, cancel=lambda: _cancel_session(runtime))
 
             # One-shot prompt (fresh process)
             if cmd in {"/fresh", "/once"}:
@@ -269,7 +417,7 @@ def register_magic(
                 if not payload:
                     print("Usage: /fresh <prompt>")
                     return None
-                result, events = ladon_run(payload)
+                result, events = cleon_run(payload)
                 _log_events(events)
                 if mode != "none":
                     _display_result(result, mode, progress)
@@ -279,12 +427,16 @@ def register_magic(
 
             if cmd == "/stop":
                 _stop_session()
-                print("ladon session stopped.")
+                if async_mode:
+                    _stop_worker_thread()
+                    print("cleon session and async worker stopped.")
+                else:
+                    print("cleon session stopped.")
                 return None
 
             if cmd == "/status":
                 alive = _session_alive()
-                print(f"ladon session: {'running' if alive else 'stopped'}")
+                print(f"cleon session: {'running' if alive else 'stopped'}")
                 return alive
 
             if cmd == "/new":
@@ -302,7 +454,9 @@ def register_magic(
 
             if cmd == "/peek_history":
                 if not context_changes:
-                    print("Context tracking not enabled. Use ladon.use(..., context_changes=True)")
+                    print(
+                        "Context tracking not enabled. Use cleon.use(..., context_changes=True)"
+                    )
                     return None
                 block = _build_context_block(context_cells, context_chars, peek=True)
                 if block:
@@ -315,6 +469,39 @@ def register_magic(
             print(f"Unknown command: {cmd}")
             print("Commands: /fresh, /stop, /status, /new, /peek_history")
             return None
+
+        # Async mode: queue request and return immediately
+        if async_mode:
+            display_id = f"codex-{uuid.uuid4().hex[:8]}"
+
+            # Show queue position
+            queue_size = _CODEX_QUEUE.qsize() if _CODEX_QUEUE else 0
+            if queue_size > 0:
+                status = f"⏳ Queued (position {queue_size + 1})"
+            else:
+                status = "🤔 Processing..."
+
+            display(
+                HTML(f'<div style="color: #888;">{status}</div>'), display_id=display_id
+            )
+
+            # Submit to queue
+            request = CodexRequest(
+                prompt=prompt,
+                display_id=display_id,
+                context_cells=context_cells,
+                context_chars=context_chars,
+                mode=mode,
+                emit_events=emit_events,
+                runtime=runtime,
+            )
+            if _CODEX_QUEUE is not None:
+                _CODEX_QUEUE.put(request)
+
+            return None
+
+        # Synchronous mode: execute immediately
+        progress = _Progress(render=stream, cancel=lambda: _cancel_session(runtime))
 
         # Build prompt with proper order: template -> context -> user prompt
         session = _shared_session(runtime)
@@ -349,7 +536,7 @@ def register_magic(
                 on_approval=_prompt_approval,
             )
         except Exception as exc:  # pragma: no cover - surfaced to notebook
-            print(f"ladon failed: {exc}")
+            print(f"cleon failed: {exc}")
             raise
 
         # Extract response and log conversation (log full prompt with template + context)
@@ -365,7 +552,7 @@ def register_magic(
     ip.register_magic_function(_codex_magic, magic_kind="cell", magic_name=normalized)
     # Register debug helper to inspect tracked context
     ip.register_magic_function(
-        history_magic, magic_kind="cell", magic_name="ladon_history"
+        history_magic, magic_kind="cell", magic_name="cleon_history"
     )
     print(f"Registered %{normalized} cell magic.")
     return _codex_magic
@@ -378,11 +565,13 @@ def register_codex_magic(**kwargs: Any) -> Callable[[str, str | None], Any]:
 
 
 def load_ipython_extension(ipython) -> None:
-    """Hook for ``%load_ext ladon.magic``."""
+    """Hook for ``%load_ext cleon.magic``."""
 
     use(ipython=ipython)
     # Register custom history cell magic under a unique name to avoid clash with built-in %history
-    ipython.register_magic_function(history_magic, magic_kind="cell", magic_name="ladon_history")
+    ipython.register_magic_function(
+        history_magic, magic_kind="cell", magic_name="cleon_history"
+    )
 
 
 def _ensure_ipython(ipython) -> Any:
@@ -479,7 +668,9 @@ class _Progress:
         self.last_message = msg
         # spinner loop handles visual updates; keep latest message
         # but still do an immediate update for responsiveness
-        self.handle.update(HTML(self._render_content(f"{next(self.spinner)} {msg}", spinner=True)))
+        self.handle.update(
+            HTML(self._render_content(f"{next(self.spinner)} {msg}", spinner=True))
+        )
 
     def update_message(self, message: str, *, markdown: bool = False) -> None:
         self.last_message = message
@@ -566,12 +757,12 @@ def _chain(
     return _inner
 
 
-def _ensure_ladon_runtime(
+def _ensure_cleon_runtime(
     *,
     binary: str | None,
     extra_env: Mapping[str, str] | None,
 ) -> dict[str, Any]:
-    """Resolve the ladon CLI path and mutate process env accordingly."""
+    """Resolve the codex CLI path and mutate process env accordingly."""
 
     runtime_env: dict[str, str] = {}
     if extra_env:
@@ -579,39 +770,39 @@ def _ensure_ladon_runtime(
             os.environ[str(key)] = str(value)
             runtime_env[str(key)] = str(value)
 
-    resolved = _resolve_ladon_binary(binary)
+    resolved = _resolve_cleon_binary(binary)
     if resolved is None:
         raise RuntimeError(
-            "Could not find the 'ladon' CLI.\n"
-            "Make sure it is on PATH, set $LADON_BIN, or call ladon.use(..., binary='/path/to/ladon')."
+            "Could not find the 'cleon' CLI.\n"
+            "Make sure it is on PATH, set $CLEON_BIN, or call cleon.use(..., binary='/path/to/cleon')."
         )
-    os.environ["LADON_BIN"] = resolved
-    runtime_env["LADON_BIN"] = resolved
+    os.environ["CLEON_BIN"] = resolved
+    runtime_env["CLEON_BIN"] = resolved
     return {"binary": resolved, "env": runtime_env}
 
 
-def _resolve_ladon_binary(explicit: str | None) -> str | None:
-    """Return a usable ladon binary path if available."""
+def _resolve_cleon_binary(explicit: str | None) -> str | None:
+    """Return a usable cleon binary path if available."""
 
     candidates: list[str] = []
     if explicit:
         candidates.append(explicit)
 
-    env_value = os.environ.get("LADON_BIN")
+    env_value = os.environ.get("CLEON_BIN")
     if env_value:
         candidates.append(env_value)
 
-    which_value = shutil.which("ladon")
+    which_value = shutil.which("cleon")
     if which_value:
         candidates.append(which_value)
 
-    # Heuristic: search upwards for a workspace target/{release,debug}/ladon
+    # Heuristic: search upwards for a workspace target/{release,debug}/cleon
     for parent in Path(__file__).resolve().parents:
         target_dir = parent / "target"
         if not target_dir.exists():
             continue
         for profile in ("release", "debug"):
-            candidate = target_dir / profile / "ladon"
+            candidate = target_dir / profile / "cleon"
             if candidate.is_file():
                 candidates.append(str(candidate))
 
@@ -683,7 +874,9 @@ def _log_template(template: str) -> None:
         return
     try:
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "template", "data": template}, ensure_ascii=False))
+            f.write(
+                json.dumps({"type": "template", "data": template}, ensure_ascii=False)
+            )
             f.write("\n")
     except Exception:
         pass
@@ -707,16 +900,16 @@ def _get_notebook_name() -> str | None:
         if ip is None:
             return None
         # Try to get notebook name from IPython
-        if hasattr(ip, 'user_ns') and '__vsc_ipynb_file__' in ip.user_ns:
-            nb_path = ip.user_ns['__vsc_ipynb_file__']
+        if hasattr(ip, "user_ns") and "__vsc_ipynb_file__" in ip.user_ns:
+            nb_path = ip.user_ns["__vsc_ipynb_file__"]
             return Path(nb_path).stem
         # Try Jupyter classic/lab
-        import ipykernel
         from jupyter_client import find_connection_file
+
         connection_file = find_connection_file()
-        kernel_id = connection_file.split('-', 1)[1].split('.')[0]
+        kernel_id = connection_file.split("-", 1)[1].split(".")[0]
         # This is a fallback - not perfect but works in many cases
-        for nb_file in Path.cwd().glob('*.ipynb'):
+        for nb_file in Path.cwd().glob("*.ipynb"):
             return nb_file.stem
     except Exception:
         pass
@@ -738,10 +931,10 @@ def _log_conversation(prompt: str, response: str) -> None:
         return
     try:
         with Path(_CONVERSATION_LOG_PATH).open("a", encoding="utf-8") as f:
-            f.write(f"{'='*80}\n")
+            f.write(f"{'=' * 80}\n")
             f.write(f"USER:\n{prompt}\n\n")
             f.write(f"ASSISTANT:\n{response}\n")
-            f.write(f"{'='*80}\n\n")
+            f.write(f"{'=' * 80}\n\n")
     except Exception:
         pass
 
@@ -751,7 +944,9 @@ def _log_context_block(block: str) -> None:
         return
     try:
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "context.block", "data": block}, ensure_ascii=False))
+            f.write(
+                json.dumps({"type": "context.block", "data": block}, ensure_ascii=False)
+            )
             f.write("\n")
     except Exception:
         pass
@@ -762,7 +957,9 @@ def _log_context_debug(payload: dict[str, Any]) -> None:
         return
     try:
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "context.debug", **payload}, ensure_ascii=False))
+            f.write(
+                json.dumps({"type": "context.debug", **payload}, ensure_ascii=False)
+            )
             f.write("\n")
     except Exception:
         pass
@@ -779,7 +976,10 @@ def _maybe_prompt_followup(
     if reply is None or not reply.strip():
         return
     reply = reply.strip()
-    resp_progress = _Progress(render=True if mode != "none" else False, cancel=lambda: _cancel_session(runtime))
+    resp_progress = _Progress(
+        render=True if mode != "none" else False,
+        cancel=lambda: _cancel_session(runtime),
+    )
     try:
         result, events = _shared_session(runtime).send(
             reply, on_event=_chain(resp_progress.update, _log_event)
@@ -938,7 +1138,9 @@ class ContextTracker:
     def __init__(self) -> None:
         self.last_seen: int = 0
 
-    def build_block(self, max_cells: int | None, max_chars: int | None, peek: bool = False) -> str:
+    def build_block(
+        self, max_cells: int | None, max_chars: int | None, peek: bool = False
+    ) -> str:
         ip = get_ipython()
         if ip is None:
             return ""
@@ -962,12 +1164,17 @@ class ContextTracker:
             if not isinstance(src, str):
                 continue
             text = src.strip()
-            # Skip %%codex, %%ladon_history, and line magics (both in magic form and IPython internal form)
-            if (text.startswith("%%codex") or text.startswith("%%ladon_history") or
-                text.startswith("%") or  # Skip all line magics like %history
-                "run_cell_magic('codex'" in text or 'run_cell_magic("codex"' in text or
-                "run_cell_magic('ladon_history'" in text or 'run_cell_magic("ladon_history"' in text or
-                "run_line_magic(" in text):  # Skip line magic internal calls
+            # Skip %%codex, %%cleon_history, and line magics (both in magic form and IPython internal form)
+            if (
+                text.startswith("%%codex")
+                or text.startswith("%%cleon_history")
+                or text.startswith("%")  # Skip all line magics like %history
+                or "run_cell_magic('codex'" in text
+                or 'run_cell_magic("codex"' in text
+                or "run_cell_magic('cleon_history'" in text
+                or 'run_cell_magic("cleon_history"' in text
+                or "run_line_magic(" in text
+            ):  # Skip line magic internal calls
                 continue
             code_block = (
                 text
@@ -1021,7 +1228,7 @@ def _configure_context() -> None:
     global _CONTEXT_TRACKER
     if _CONTEXT_TRACKER is None:
         _CONTEXT_TRACKER = ContextTracker()
-        # Start tracking from current history position (ignore cells before ladon.use())
+        # Start tracking from current history position (ignore cells before cleon.use())
         ip = get_ipython()
         if ip is not None:
             history = ip.user_ns.get("In", [])
@@ -1029,7 +1236,9 @@ def _configure_context() -> None:
                 _CONTEXT_TRACKER.last_seen = len(history) - 1
 
 
-def _build_context_block(max_cells: int | None, max_chars: int | None, peek: bool = False) -> str:
+def _build_context_block(
+    max_cells: int | None, max_chars: int | None, peek: bool = False
+) -> str:
     if _CONTEXT_TRACKER is None:
         return ""
     return _CONTEXT_TRACKER.build_block(max_cells, max_chars, peek=peek)

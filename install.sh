@@ -18,6 +18,6 @@ if ! command -v maturin >/dev/null 2>&1; then
 fi
 
 cargo build --release
-maturin build --release --manifest-path "$ROOT/python/ladon/Cargo.toml" --out "$ROOT/dist"
-WHEEL="$(ls -t "$ROOT"/dist/ladon-*.whl | head -n1)"
+maturin build --release --manifest-path "$ROOT/python/cleon/Cargo.toml" --out "$ROOT/dist"
+WHEEL="$(ls -t "$ROOT"/dist/cleon-*.whl | head -n1)"
 uv pip install --reinstall "$WHEEL"
