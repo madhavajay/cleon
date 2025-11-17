@@ -6,3 +6,5 @@
 /python/__pycache__/
 /python/ladon/target/*
 /python/src/ladon/_ladon*.so
+
+**/__pycache__/*
