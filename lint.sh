@@ -1,31 +1,24 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY_ROOT="$ROOT/python"
+export UV_VENV_CLEAR=1
+uv venv
+uv pip install -e ./python
+uv pip install pytest ruff mypy vulture
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "error: uv is required. install via 'pip install uv' or https://github.com/astral-sh/uv" >&2
-  exit 1
-fi
-
-uv venv -p 3.13 --allow-existing
-
-uv pip install -e "$PY_ROOT"
-uv pip install ruff mypy vulture
-
-cd "$PY_ROOT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/python"
 
 echo "Running ruff format..."
-uv run ruff format src
+uv run ruff format .
 
-echo "Running ruff check..."
-uv run ruff check --fix src
+echo "Running ruff check with fixes..."
+uv run ruff check . --fix
 
 echo "Running mypy..."
-uv run mypy src
+uv run mypy .
 
 echo "Running vulture to detect dead code..."
-uv run vulture src --min-confidence 80
+uv run vulture src tests --min-confidence 80
 
 echo "✓ All linting checks passed!"

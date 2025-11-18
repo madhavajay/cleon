@@ -11,6 +11,7 @@ from .magic import (
     history_magic,
     help as help_text,
     stop as stop_session,
+    resume as resume_session,
 )
 from . import autoroute
 
@@ -21,6 +22,7 @@ __all__ = [
     "register_codex_magic",
     "use",
     "stop",
+    "resume",
     "autoroute",
     "load_ipython_extension",
     "history_magic",
@@ -29,9 +31,13 @@ __all__ = [
 
 
 # Expose help() at top-level for convenience
-def help() -> str:  # type: ignore[override]
+def help() -> None:  # type: ignore[override]
     return help_text()
 
 
 def stop() -> str | None:
     return stop_session()
+
+
+def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
+    return resume_session(agent=agent, session_id=session_id)

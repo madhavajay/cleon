@@ -156,6 +156,9 @@ async fn run_interactive(
             break;
         }
         let trimmed = line.trim();
+        if trimmed == "__CLEON_STOP__" {
+            break;
+        }
         if trimmed.is_empty() {
             continue;
         }
@@ -362,14 +365,20 @@ impl FullCodexSession {
             msg: EventMsg::SessionConfigured(session_configured.clone()),
         };
         let bootstrap_events = event_processor.collect_thread_events(&bootstrap_event);
+        let mut session_id = None;
+        let mut rollout_path = None;
+        if let EventMsg::SessionConfigured(cfg) = &bootstrap_event.msg {
+            session_id = Some(cfg.session_id.to_string());
+            rollout_path = Some(cfg.rollout_path.display().to_string());
+        }
 
         Ok(Self {
             conversation,
             event_rx: rx,
             event_processor,
             bootstrap_events,
-            session_id: None,
-            rollout_path: None,
+            session_id,
+            rollout_path,
             default_cwd: config.cwd.clone(),
             default_approval: config.approval_policy,
             default_sandbox_policy: config.sandbox_policy.clone(),

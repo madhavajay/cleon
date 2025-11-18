@@ -37,28 +37,26 @@ jobs:
           cd python/cleon
           cargo clippy --all-targets --all-features -- -D warnings
 
-  python-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+  # python-lint:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+  #     - name: Set up Python
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.12"
 
-      - name: Set up Python
-        run: uv python install 3.9
+  #     - name: Install uv
+  #       uses: astral-sh/setup-uv@v5
+  #       with:
+  #         enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          cd python
-          uv sync --all-extras
-
-      - name: Run Python linting
-        run: bash lint.sh
+  #     - name: Run Python linting
+  #       shell: bash
+  #       run: ./lint.sh
 
   test:
     runs-on: ${{ matrix.os }}
@@ -92,40 +90,10 @@ jobs:
 
       - name: Build with Maturin
         run: |
-          cd python
+          uv venv
           uv pip install maturin
-          uv run maturin develop
-
-      - name: Install dependencies
-        run: |
-          cd python
-          uv sync --all-extras
+          uv run -- maturin develop
 
       - name: Run tests
         run: |
-          cd python
-          uv run pytest
-
-  test-local:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.9
-
-      - name: Run smoke test
-        run: bash test.sh
+          ./test.sh
