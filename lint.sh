@@ -17,15 +17,15 @@ uv pip install ruff mypy vulture
 cd "$PY_ROOT"
 
 echo "Running ruff format..."
-uv run ruff format src
+uv run python -m ruff format src
 
 echo "Running ruff check..."
-uv run ruff check --fix src
+uv run python -m ruff check --fix src
 
 echo "Running mypy..."
-uv run mypy src
+uv run python -m mypy src
 
 echo "Running vulture to detect dead code..."
-uv run vulture src --min-confidence 80
+uv run python -m vulture src --min-confidence 80
 
 echo "✓ All linting checks passed!"
