@@ -57,6 +57,7 @@ _CANCELLED_REQUESTS: set[str] = set()
 _CANCELLED_LOCK = threading.Lock()
 _CANCEL_ALL = threading.Event()
 _PENDING_REQUESTS: dict[str, str] = {}
+_SESSION_ALLOWED = False
 
 
 @dataclass
@@ -90,6 +91,7 @@ class SharedSession:
         self.session_id: str | None = session_id
         self.rollout_path: str | None = None
         self.resume_command: str | None = None
+        self.stopped: bool = False
 
     def ensure_started(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -110,20 +112,18 @@ class SharedSession:
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
             try:
-                # Gracefully close stdin to let the CLI exit and emit resume info
                 if self.proc.stdin:
                     try:
-                        self.proc.stdin.close()
+                        self.proc.stdin.write("__CLEON_STOP__\n")
+                        self.proc.stdin.flush()
                     except Exception:
                         pass
-                # Drain stdout while waiting for graceful exit
-                deadline = time.time() + 3.0
+                deadline = time.time() + 5.0
                 while time.time() < deadline:
                     if self.proc.poll() is not None:
                         break
                     self._drain_stdout(capture_metadata=True)
                     time.sleep(0.05)
-                # Final drain after exit or timeout
                 self._drain_stdout(capture_metadata=True)
                 if self.proc.poll() is None:
                     self.proc.terminate()
@@ -136,6 +136,7 @@ class SharedSession:
                 self.proc.kill()
         self.proc = None
         self.first_turn = True
+        self.stopped = True
 
     def _read_lines(self) -> Iterable[str]:
         assert self.proc is not None
@@ -157,7 +158,7 @@ class SharedSession:
             self.ensure_started()
             assert self.proc is not None
             # Drain any leftover stdout before sending a new prompt
-            self._drain_stdout()
+            self._drain_stdout(capture_metadata=True)
             if self.proc.stdin is None:
                 raise RuntimeError("cleon session stdin unavailable")
             # Interactive mode uses read_line() which stops at first \n
@@ -310,6 +311,8 @@ def use(
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
 
+    global _SESSION_ALLOWED
+    _SESSION_ALLOWED = True
     register_magic(
         name=name,
         binary=binary,
@@ -457,6 +460,37 @@ def _reset_cancellations() -> None:
         _CANCELLED_REQUESTS.clear()
         _PENDING_REQUESTS.clear()
     _start_worker_thread()
+
+
+def _session_store_path() -> Path:
+    return Path.cwd() / ".cleon_session.json"
+
+
+def _load_session_store() -> dict[str, dict[str, str]]:
+    try:
+        path = _session_store_path()
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _persist_session_id(session_id: str, resume_cmd: str | None) -> None:
+    try:
+        store = _load_session_store()
+        key = _get_notebook_name() or "default"
+        store[key] = {
+            "session_id": session_id,
+            "resume_command": resume_cmd or "",
+            "agent": "codex",
+        }
+        path = _session_store_path()
+        path.write_text(
+            json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 def _render_async_status(
@@ -815,7 +849,7 @@ def load_ipython_extension(ipython) -> None:
     )
 
 
-def help() -> str:
+def help() -> None:
     """Return concise help text without auto-displaying in notebooks."""
 
     text = """Add a `>` before your prompt:  
@@ -833,6 +867,23 @@ def stop() -> str | None:
     if _ASYNC_MODE:
         _stop_worker_thread()
     return session_id
+
+
+def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
+    """Resume a saved cleon session (defaults to current notebook entry)."""
+
+    sid = session_id
+    if sid is None:
+        store = _load_session_store()
+        key = _get_notebook_name() or "default"
+        entry = store.get(key) or store.get("default")
+        if entry and entry.get("agent") == agent:
+            sid = entry.get("session_id")
+    if not sid:
+        print("No saved session to resume. Start a new one with cleon.use(...).")
+        return None
+    use(agent, session_id=sid)
+    return sid
 
 
 def _ensure_ipython(ipython) -> Any:
@@ -988,7 +1039,9 @@ class _Progress:
         self.last_result_text: str = ""
         self._stop = threading.Event()
         self._cancel = _cancel
-        self._thread = threading.Thread(target=self._loop, daemon=True) if render else None
+        self._thread = (
+            threading.Thread(target=self._loop, daemon=True) if render else None
+        )
         if self._thread is not None:
             self._thread.start()
         if render:
@@ -1173,13 +1226,17 @@ def _resolve_cleon_binary(explicit: str | None) -> str | None:
 
 def _shared_session(runtime: Mapping[str, Any]) -> SharedSession:
     global _SESSION
+    if not _SESSION_ALLOWED:
+        raise RuntimeError(
+            "cleon session not active. To resume call cleon.resume() or cleon.use(..., session_id=...) or start a new session."
+        )
     if _SESSION is None:
         _SESSION = SharedSession(
             binary=str(runtime["binary"]),
             env=runtime.get("env") or {},
             session_id=runtime.get("session_id"),
         )
-    if _SESSION.proc is None and not _SESSION.first_turn:
+    if _SESSION.proc is None and _SESSION.stopped:
         msg = "cleon session stopped. Start a new session with cleon.use(..., session_id=...) to resume or cleon.use(...) to start fresh."
         raise RuntimeError(msg)
     return _SESSION
@@ -1489,7 +1546,7 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
 
 
 def _stop_session() -> str | None:
-    global _SESSION
+    global _SESSION, _SESSION_ALLOWED
     if _SESSION is None:
         return None
     _SESSION.stop()
@@ -1498,8 +1555,16 @@ def _stop_session() -> str | None:
     if session_id:
         if not resume_cmd:
             resume_cmd = f"cleon --resume {session_id}"
-        print(f"To continue this session, run: {resume_cmd}")
+        _persist_session_id(session_id, resume_cmd)
+        print(
+            "Session stopped.\n"
+            "You can resume with:\n"
+            f'  cleon.use("codex", session_id="{session_id}")\n'
+            "or\n"
+            "  cleon.resume()"
+        )
     _SESSION = None
+    _SESSION_ALLOWED = False
     return session_id
 
 
