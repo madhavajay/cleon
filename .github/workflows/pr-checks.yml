@@ -94,8 +94,8 @@ jobs:
         run: |
           cd python
           uv venv
-          uv pip install maturin
-          uv run maturin develop
+          uv pip install maturin pytest
+          uv run -- maturin develop
 
       - name: Install dependencies
         run: |
@@ -106,27 +106,3 @@ jobs:
         run: |
           cd python
           uv run pytest
-
-  test-local:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.9
-
-      - name: Run smoke test
-        run: bash test.sh
