@@ -691,6 +691,8 @@ dependencies = [
  "clap",
  "codex-app-server-protocol",
  "codex-core",
+ "codex-lmstudio",
+ "codex-ollama",
  "codex-protocol",
  "once_cell",
  "serde",
@@ -773,7 +775,6 @@ dependencies = [
  "codex-arg0",
  "codex-common",
  "codex-core",
- "codex-ollama",
  "codex-protocol",
  "mcp-types",
  "opentelemetry-appender-tracing",
@@ -832,6 +833,18 @@ dependencies = [
  "landlock",
  "libc",
  "seccompiler",
+]
+
+[[package]]
+name = "codex-lmstudio"
+version = "0.0.0"
+dependencies = [
+ "codex-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "which",
 ]
 
 [[package]]

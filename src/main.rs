@@ -8,6 +8,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_core::auth::{self, enforce_login_restrictions, login_with_api_key, logout};
 use codex_core::config::{Config, ConfigOverrides};
 use codex_core::default_client::{self, SetOriginatorError};
+use codex_core::find_conversation_path_by_id_str;
 use codex_core::protocol::{
     AskForApproval, Event, EventMsg, Op, ReviewDecision, SandboxPolicy, SessionSource,
 };
@@ -20,6 +21,7 @@ use codex_protocol::config_types::{
 };
 use codex_protocol::user_input::UserInput;
 use serde::Serialize;
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -34,6 +36,10 @@ struct Cli {
     /// Optional prompt text. Use "-" to force reading stdin.
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
+
+    /// Resume a previous session by its session UUID.
+    #[arg(long = "resume", value_name = "SESSION_ID")]
+    resume: Option<String>,
 
     /// Run only a single prompt non-interactively.
     #[arg(long = "non-interactive", default_value_t = false)]
@@ -94,6 +100,7 @@ async fn run() -> Result<()> {
 
     let Cli {
         prompt,
+        resume,
         non_interactive,
         json_events,
         json_result,
@@ -104,17 +111,18 @@ async fn run() -> Result<()> {
         Some(Command::Login(args)) => handle_login(args).await,
         Some(Command::Logout) => handle_logout().await,
         Some(Command::Status) => handle_status().await,
-        None => run_session(prompt, !non_interactive, json_events, json_result).await,
+        None => run_session(prompt, resume, !non_interactive, json_events, json_result).await,
     }
 }
 
 async fn run_session(
     prompt: Option<String>,
+    resume_session: Option<String>,
     interactive: bool,
     json_events: bool,
     json_result: bool,
 ) -> Result<()> {
-    let mut session = FullCodexSession::new().await?;
+    let mut session = FullCodexSession::new(resume_session).await?;
 
     if interactive {
         run_interactive(&mut session, prompt, json_events, json_result).await?;
@@ -280,6 +288,8 @@ struct FullCodexSession {
     event_rx: UnboundedReceiver<Event>,
     event_processor: EventProcessorWithJsonOutput,
     bootstrap_events: Vec<ThreadEvent>,
+    session_id: Option<String>,
+    rollout_path: Option<String>,
     default_cwd: PathBuf,
     default_approval: AskForApproval,
     default_sandbox_policy: SandboxPolicy,
@@ -289,7 +299,7 @@ struct FullCodexSession {
 }
 
 impl FullCodexSession {
-    async fn new() -> Result<Self> {
+    async fn new(resume_session: Option<String>) -> Result<Self> {
         let config = Arc::new(load_config().await?);
 
         enforce_login_restrictions(&config)
@@ -302,14 +312,31 @@ impl FullCodexSession {
             config.cli_auth_credentials_store_mode,
         );
 
-        let conversation_manager = ConversationManager::new(auth_manager, SessionSource::Cli);
+        let conversation_manager =
+            ConversationManager::new(auth_manager.clone(), SessionSource::Cli);
         let NewConversation {
             conversation_id: _,
             conversation,
             session_configured,
-        } = conversation_manager
-            .new_conversation((*config).clone())
-            .await?;
+        } = if let Some(resume) = resume_session {
+            let path = find_conversation_path_by_id_str(&config.codex_home, &resume)
+                .await
+                .context("failed to search for session to resume")?;
+            let Some(rollout_path) = path else {
+                bail!("No saved session found with ID {resume}");
+            };
+            conversation_manager
+                .resume_conversation_from_rollout(
+                    (*config).clone(),
+                    rollout_path,
+                    auth_manager.clone(),
+                )
+                .await?
+        } else {
+            conversation_manager
+                .new_conversation((*config).clone())
+                .await?
+        };
 
         let (tx, rx) = unbounded_channel::<Event>();
         let event_conversation = conversation.clone();
@@ -341,6 +368,8 @@ impl FullCodexSession {
             event_rx: rx,
             event_processor,
             bootstrap_events,
+            session_id: None,
+            rollout_path: None,
             default_cwd: config.cwd.clone(),
             default_approval: config.approval_policy,
             default_sandbox_policy: config.sandbox_policy.clone(),
@@ -396,6 +425,10 @@ impl FullCodexSession {
                         break;
                     };
                     match &event.msg {
+                EventMsg::SessionConfigured(cfg) => {
+                    self.session_id = Some(cfg.session_id.to_string());
+                    self.rollout_path = Some(cfg.rollout_path.display().to_string());
+                }
                 EventMsg::ExecApprovalRequest(req) => {
                     approvals.push_back((event.id.clone(), EventMsg::ExecApprovalRequest(req.clone())));
                     println!("{}", serde_json::to_string(&serde_json::json!({
@@ -472,6 +505,16 @@ impl FullCodexSession {
 
     async fn shutdown(&self) -> Result<()> {
         let _ = self.conversation.submit(Op::Shutdown).await;
+        if let Some(id) = &self.session_id {
+            let resume_cmd = format!("cleon --resume {id}");
+            let info = json!({
+                "type": "session.resume",
+                "session_id": id,
+                "rollout_path": self.rollout_path,
+                "resume_command": resume_cmd,
+            });
+            println!("{info}");
+        }
         Ok(())
     }
 }

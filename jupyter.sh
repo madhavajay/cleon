@@ -1,8 +1,7 @@
 #!/bin/bash
 set -e
 
-export UV_VENV_CLEAR=1
-uv venv -p 3.13
+uv venv -p 3.13 --allow-existing
 echo "Installing jupyter dependencies..."
 uv pip install jupyter ipykernel maturin
 
