@@ -124,7 +124,20 @@ jobs:
         with:
           workspaces: python/cleon
 
+      # Toolchain for cross-compiling the CLI we bundle into the wheel
+      - name: Install aarch64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
       - name: Build and stage cleon CLI
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: |
           ./scripts/stage_cli.sh ${{ matrix.target }}
 
@@ -136,6 +149,11 @@ jobs:
           args: --release --out dist --manifest-path python/cleon/Cargo.toml
           sccache: 'true'
           manylinux: auto
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -153,6 +171,9 @@ jobs:
           submodules: recursive
 
       - name: Build and stage cleon CLI
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
         run: |
           ./scripts/stage_cli.sh
 
@@ -162,6 +183,9 @@ jobs:
           working-directory: .
           command: sdist
           args: --out dist --manifest-path python/cleon/Cargo.toml
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
 
       - name: Upload sdist
         uses: actions/upload-artifact@v4
