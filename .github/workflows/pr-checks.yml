@@ -94,13 +94,13 @@ jobs:
         run: |
           cd python
           uv venv
-          uv pip install maturin pytest
+          uv pip install maturin
           uv run -- maturin develop
 
       - name: Install dependencies
         run: |
           cd python
-          uv sync --all-extras
+          uv pip install -r requirements-dev.txt
 
       - name: Run tests
         run: |
