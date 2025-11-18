@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import itertools
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -51,6 +53,8 @@ _ASYNC_MODE: bool = False
 _CODEX_QUEUE: "queue.Queue[CodexRequest | None] | None" = None
 _WORKER_THREAD: threading.Thread | None = None
 _SESSION_LOCK = threading.Lock()
+_AUTO_ROUTE_INSTALLED = False
+_ORIG_RUN_CELL = None
 
 
 @dataclass
@@ -59,6 +63,7 @@ class CodexRequest:
 
     prompt: str
     display_id: str
+    status_text: str
     context_cells: int | None
     context_chars: int | None
     mode: str
@@ -217,6 +222,7 @@ def use(
     context_cells: int | None = None,
     context_chars: int | None = None,
     async_mode: bool = False,
+    auto: bool = False,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
@@ -236,6 +242,7 @@ def use(
         context_cells=context_cells,
         context_chars=context_chars,
         async_mode=async_mode,
+        auto=auto,
         ipython=ipython,
     )
 
@@ -284,6 +291,12 @@ def _stop_worker_thread() -> None:
 
 def _process_codex_request(request: CodexRequest) -> None:
     """Process a single codex request and update display."""
+    progress = _Progress(
+        render=request.mode != "none",
+        cancel=lambda: _stop_session(),
+        display_id=request.display_id,
+        initial_message=request.status_text or "Processing...",
+    )
     try:
         # Build full prompt with template/context
         session = _shared_session(request.runtime)
@@ -317,7 +330,7 @@ def _process_codex_request(request: CodexRequest) -> None:
         # Send to codex
         result, events = session.send(
             full_prompt,
-            on_event=_log_event,
+            on_event=_chain(progress.update, _log_event),
             on_approval=_prompt_approval,
         )
 
@@ -327,14 +340,7 @@ def _process_codex_request(request: CodexRequest) -> None:
 
         # Update cell display with result
         if request.mode != "none":
-            if request.mode == "markdown" or (request.mode == "auto" and response):
-                update_display(
-                    Markdown(response or "(no response)"), display_id=request.display_id
-                )
-            else:
-                update_display(
-                    response or "(no response)", display_id=request.display_id
-                )
+            _display_result(result, request.mode, progress)
 
         if request.emit_events:
             update_display(events, display_id=f"{request.display_id}-events")
@@ -342,7 +348,10 @@ def _process_codex_request(request: CodexRequest) -> None:
     except Exception as e:
         # Show error in cell
         error_msg = f"❌ Codex error: {e}"
-        update_display(error_msg, display_id=request.display_id)
+        if progress.handle is not None:
+            progress.finish(error_msg, markdown=False)
+        else:
+            update_display(error_msg, display_id=request.display_id)
 
 
 def register_magic(
@@ -361,6 +370,7 @@ def register_magic(
     context_cells: int | None = None,
     context_chars: int | None = None,
     async_mode: bool = False,
+    auto: bool = False,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
     """Register the ``%%name`` cell magic for cleon."""
@@ -485,6 +495,7 @@ def register_magic(
             request = CodexRequest(
                 prompt=prompt,
                 display_id=display_id,
+                status_text=status,
                 context_cells=context_cells,
                 context_chars=context_chars,
                 mode=mode,
@@ -549,6 +560,8 @@ def register_magic(
     ip.register_magic_function(
         history_magic, magic_kind="cell", magic_name="cleon_history"
     )
+    if auto:
+        _enable_auto_route(ip, normalized)
     print(f"Registered %{normalized} cell magic.")
     return _codex_magic
 
@@ -574,6 +587,108 @@ def _ensure_ipython(ipython) -> Any:
     if ip is None:
         raise RuntimeError("No active IPython session; run inside Jupyter or IPython.")
     return ip
+
+
+def _enable_auto_route(ip, magic_name: str) -> None:
+    """Intercept run_cell to auto-route natural language cells to codex cell magic."""
+
+    global _AUTO_ROUTE_INSTALLED, _ORIG_RUN_CELL
+    if _AUTO_ROUTE_INSTALLED:
+        return
+    orig = getattr(ip, "run_cell", None)
+    if orig is None:
+        return
+
+    def _wrapped_run_cell(raw_cell, *args, **kwargs):
+        try:
+            text = raw_cell if isinstance(raw_cell, str) else ""
+            if _should_route_to_codex(text):
+                prompt_text = _strip_prompt_prefix(text)
+                routed_cell = f"%%{magic_name}\n{prompt_text}"
+                return orig(routed_cell, *args, **kwargs)
+        except Exception:
+            pass  # On heuristic failure, fall back to normal execution
+        return orig(raw_cell, *args, **kwargs)
+
+    ip.run_cell = _wrapped_run_cell
+    _ORIG_RUN_CELL = orig
+    _AUTO_ROUTE_INSTALLED = True
+
+
+def _should_route_to_codex(raw_cell: str) -> bool:
+    """Return True if the cell looks like prose/natural language."""
+
+    if not raw_cell:
+        return False
+    text = raw_cell.lstrip()
+    if not text:
+        return False
+    if text.startswith(("%%", "%", "!", "?")):
+        return False  # Respect explicit magics/shell/inspect
+
+    # Fast path: valid Python -> leave to IPython
+    try:
+        ast.parse(raw_cell)
+        return False
+    except SyntaxError:
+        pass
+
+    # If it looks like code but is broken, let Python handle the error
+    if _looks_like_code(raw_cell):
+        return False
+
+    return True
+
+
+def _looks_like_code(raw_cell: str) -> bool:
+    """Heuristic to spot code-ish text even if it doesn't parse."""
+
+    lower = raw_cell.lower()
+    keywords = (
+        "def ",
+        "class ",
+        "import ",
+        "from ",
+        "for ",
+        "while ",
+        "if ",
+        "elif ",
+        "else:",
+        "try:",
+        "except",
+        "with ",
+        "return",
+        "lambda",
+        "yield",
+    )
+    if any(kw in lower for kw in keywords):
+        return True
+
+    # Operators / punctuation that usually indicate code
+    if re.search(r"[=+\-*/%<>]=|==|!=|:=|->|::|\{|\}|\[|\]|\(|\)|;", raw_cell):
+        return True
+
+    return False
+
+
+def _strip_prompt_prefix(text: str) -> str:
+    """If all non-empty lines start with '> ', strip that prefix for Codex prompts."""
+
+    lines = text.splitlines()
+    non_empty = [ln for ln in lines if ln.strip()]
+    if non_empty and all(ln.lstrip().startswith(">") for ln in non_empty):
+        stripped_lines = []
+        for ln in lines:
+            if ln.lstrip().startswith(">"):
+                # Remove leading ">" and one following space if present
+                candidate = ln.lstrip()[1:]
+                if candidate.startswith(" "):
+                    candidate = candidate[1:]
+                stripped_lines.append(candidate)
+            else:
+                stripped_lines.append(ln)
+        return "\n".join(stripped_lines)
+    return text
 
 
 def _normalize_payload(line: str, cell: str | None) -> str:
@@ -645,9 +760,16 @@ def _print_events(events: Any) -> None:
 class _Progress:
     spinner = itertools.cycle("-\\|/")
 
-    def __init__(self, render: bool, cancel: Callable[[], None] | None = None) -> None:
-        self.handle = display(HTML(""), display_id=True) if render else None
-        self.last_message = "Working..."
+    def __init__(
+        self,
+        render: bool,
+        cancel: Callable[[], None] | None = None,
+        display_id: str | None = None,
+        initial_message: str | None = None,
+    ) -> None:
+        self.handle = None
+        self.handle_id = display_id if render else None
+        self.last_message = initial_message or "Working..."
         self.last_result_text: str = ""
         self._stop = threading.Event()
         self._thread = (
@@ -655,6 +777,13 @@ class _Progress:
         )
         if self._thread is not None:
             self._thread.start()
+        if render:
+            if display_id is None:
+                self.handle = display(HTML(""), display_id=True)
+            else:
+                update_display(HTML(initial_message or ""), display_id=display_id)
+            if initial_message:
+                self.update_message(initial_message)
 
     def _render_content(self, message: str, spinner: bool = False) -> str:
         """Render content with optional spinner."""
@@ -662,35 +791,37 @@ class _Progress:
         return f'<div style="{style}">{message}</div>'
 
     def update(self, event: Any) -> None:
-        if self.handle is None:
-            return
         msg = _summarize_event(event) or self.last_message
         self.last_message = msg
-        # spinner loop handles visual updates; keep latest message
-        # but still do an immediate update for responsiveness
-        self.handle.update(
-            HTML(self._render_content(f"{next(self.spinner)} {msg}", spinner=True))
-        )
+        rendered = HTML(self._render_content(f"{next(self.spinner)} {msg}", spinner=True))
+        if self.handle_id is not None:
+            update_display(rendered, display_id=self.handle_id)
+            return
+        if self.handle is not None:
+            self.handle.update(rendered)
 
     def update_message(self, message: str, *, markdown: bool = False) -> None:
         self.last_message = message
-        if self.handle is None:
+        rendered = Markdown(message) if markdown else HTML(
+            self._render_content(message, spinner=False)
+        )
+        if self.handle_id is not None:
+            update_display(rendered, display_id=self.handle_id)
             return
-        if markdown:
-            self.handle.update(Markdown(message))
-        else:
-            self.handle.update(HTML(self._render_content(message, spinner=False)))
+        if self.handle is not None:
+            self.handle.update(rendered)
 
     def finish(self, message: str, markdown: bool = False) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
-        if self.handle is None:
-            return
-        if markdown:
-            self.handle.update(Markdown(message))
-        else:
-            self.handle.update(HTML(self._render_content(message, spinner=False)))
+        rendered = Markdown(message) if markdown else HTML(
+            self._render_content(message, spinner=False)
+        )
+        if self.handle_id is not None:
+            update_display(rendered, display_id=self.handle_id)
+        elif self.handle is not None:
+            self.handle.update(rendered)
         self.handle = None
 
     def _loop(self) -> None:
@@ -1048,6 +1179,7 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
     command = event.get("command")
     reason = event.get("reason")
     cwd = event.get("cwd")
+    display_id = f"codex-approval-{uuid.uuid4().hex[:8]}"
     options = {
         "1": ("approve", "Approve"),
         "2": ("approve_session", "Approve for session"),
@@ -1094,7 +1226,8 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
                     widgets.HBox(buttons),
                     out,
                 ]
-            )
+            ),
+            display_id=display_id,
         )
 
         # Wait until a button is clicked
@@ -1105,6 +1238,13 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
         pass
 
     # Fallback to stdin
+    try:
+        update_display(
+            Markdown(f"**Approval requested**\n\n```\n{question_text}\n```"),
+            display_id=display_id,
+        )
+    except Exception:
+        pass
     print(question_text)
     for key, (_, label) in options.items():
         print(f"{key}. {label}")
