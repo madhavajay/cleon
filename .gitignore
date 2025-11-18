@@ -13,3 +13,4 @@
 cleon.log
 cleon_demo.log
 .cleon_session.json
+python/src/cleon/bin/*

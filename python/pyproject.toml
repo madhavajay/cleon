@@ -17,4 +17,8 @@ manifest-path = "cleon/Cargo.toml"
 module-name = "cleon._cleon"
 python-source = "src"
 python-packages = ["cleon"]
-include = ["src/cleon/py.typed", "src/cleon/_cleon.pyi"]
+include = [
+    "src/cleon/py.typed",
+    "src/cleon/_cleon.pyi",
+    "src/cleon/bin/*",
+]

@@ -38,6 +38,8 @@ if ! command -v maturin >/dev/null 2>&1; then
 fi
 
 cargo build --release ${QUIET:+--quiet}
+# Stage the CLI binary so the wheel bundles it
+"$ROOT/scripts/stage_cli.sh"
 maturin build --release --manifest-path "$ROOT/python/cleon/Cargo.toml" --out "$ROOT/dist" ${QUIET:+--quiet}
 WHEEL="$(ls -t "$ROOT"/dist/cleon-*.whl | head -n1)"
 uv pip install --reinstall "$WHEEL" ${QUIET:+--quiet}

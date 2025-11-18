@@ -124,6 +124,10 @@ jobs:
         with:
           workspaces: python/cleon
 
+      - name: Build and stage cleon CLI
+        run: |
+          ./scripts/stage_cli.sh ${{ matrix.target }}
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -147,6 +151,10 @@ jobs:
         with:
           ref: main
           submodules: recursive
+
+      - name: Build and stage cleon CLI
+        run: |
+          ./scripts/stage_cli.sh
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
