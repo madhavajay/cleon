@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import itertools
 import os
 import queue
-import re
 import threading
 import time
 import uuid
@@ -55,6 +53,9 @@ _WORKER_THREAD: threading.Thread | None = None
 _SESSION_LOCK = threading.Lock()
 _AUTO_ROUTE_INSTALLED = False
 _ORIG_RUN_CELL = None
+_CANCELLED_REQUESTS: set[str] = set()
+_CANCELLED_LOCK = threading.Lock()
+_CANCEL_ALL = threading.Event()
 
 
 @dataclass
@@ -63,6 +64,7 @@ class CodexRequest:
 
     prompt: str
     display_id: str
+    request_id: str
     status_text: str
     context_cells: int | None
     context_chars: int | None
@@ -74,17 +76,28 @@ class CodexRequest:
 class SharedSession:
     """Lightweight persistent codex CLI process for multi-turn use."""
 
-    def __init__(self, binary: str, env: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        binary: str,
+        env: Mapping[str, str] | None = None,
+        session_id: str | None = None,
+    ) -> None:
         self.binary = binary
         self.env = dict(env or {})
         self.proc: subprocess.Popen[str] | None = None
         self.first_turn: bool = True
+        self.session_id: str | None = session_id
+        self.rollout_path: str | None = None
+        self.resume_command: str | None = None
 
     def ensure_started(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
+        cmd = [self.binary, "--json-events", "--json-result"]
+        if self.session_id:
+            cmd.extend(["--resume", self.session_id])
         self.proc = subprocess.Popen(
-            [self.binary, "--json-events", "--json-result"],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -94,11 +107,18 @@ class SharedSession:
         )
 
     def stop(self) -> None:
+        # Try to let the process flush resume info before killing it.
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
             try:
+                self.proc.terminate()
+                # Drain any trailing stdout to capture session metadata (e.g., resume info)
+                self._drain_stdout(capture_metadata=True)
                 self.proc.wait(timeout=2)
             except Exception:
+                try:
+                    self._drain_stdout(capture_metadata=True)
+                except Exception:
+                    pass
                 self.proc.kill()
         self.proc = None
         self.first_turn = True
@@ -141,6 +161,7 @@ class SharedSession:
                     parsed = json.loads(line)
                 except Exception:
                     continue
+                self._capture_session_metadata(parsed)
                 events.append(parsed)
                 if parsed.get("type") == "approval.request":
                     if on_approval is not None:
@@ -176,34 +197,81 @@ class SharedSession:
                 raise RuntimeError("cleon output missing turn.result payload")
             return final, events
 
-    def _drain_stdout(self) -> None:
+    def _drain_stdout(self, capture_metadata: bool = False) -> None:
         """Best-effort drain of any pending stdout to avoid bleed between turns."""
         assert self.proc is not None
         stdout = self.proc.stdout
         if stdout is None:
             return
+
+        def _maybe_parse(line: str) -> None:
+            if not capture_metadata:
+                return
+            try:
+                parsed = json.loads(line)
+                self._capture_session_metadata(parsed)
+            except Exception:
+                pass
+
         try:
             fd = stdout.fileno()
         except Exception:
             # Some file-like objects (e.g. StringIO in tests) don't expose fileno
             try:
                 if hasattr(stdout, "seekable") and stdout.seekable():
-                    stdout_flush_limit = 50
-                    for _ in range(stdout_flush_limit):
+                    for _ in range(50):
                         line = stdout.readline()
                         if not line:
                             break
+                        _maybe_parse(line)
             except Exception:
                 pass
             return
-        stdout_flush_limit = 50
-        for _ in range(stdout_flush_limit):
+
+        for _ in range(50):
             ready, _, _ = select.select([fd], [], [], 0)
             if not ready:
                 break
             line = stdout.readline()
             if not line:
                 break
+            _maybe_parse(line)
+
+    def _capture_session_metadata(self, payload: Any) -> None:
+        """Pull session_id/rollout_path from json payloads when present."""
+        try:
+            if isinstance(payload, dict):
+                if payload.get("type") == "session.resume":
+                    if isinstance(payload.get("session_id"), str):
+                        self.session_id = payload["session_id"]
+                    if isinstance(payload.get("resume_command"), str):
+                        self.resume_command = payload["resume_command"]
+                    if isinstance(payload.get("rollout_path"), str):
+                        self.rollout_path = payload["rollout_path"]
+                if self.session_id is None:
+                    if "session_id" in payload and isinstance(
+                        payload["session_id"], str
+                    ):
+                        self.session_id = payload["session_id"]
+                    elif (
+                        "msg" in payload
+                        and isinstance(payload["msg"], dict)
+                        and isinstance(payload["msg"].get("session_id"), str)
+                    ):
+                        self.session_id = payload["msg"]["session_id"]
+                if self.rollout_path is None:
+                    if "rollout_path" in payload and isinstance(
+                        payload["rollout_path"], str
+                    ):
+                        self.rollout_path = payload["rollout_path"]
+                    elif (
+                        "msg" in payload
+                        and isinstance(payload["msg"], dict)
+                        and isinstance(payload["msg"].get("rollout_path"), str)
+                    ):
+                        self.rollout_path = payload["msg"]["rollout_path"]
+        except Exception:
+            pass
 
 
 def use(
@@ -216,18 +284,19 @@ def use(
     debug: bool = False,
     stream: bool = True,
     prompt_user: bool = False,
-    log_path: str | os.PathLike[str] | None = None,
+    log_path: str | os.PathLike[str] | None = "./cleon.log",
     cancel_path: str | os.PathLike[str] | None = None,
-    context_changes: bool = False,
+    context_changes: bool = True,
     context_cells: int | None = None,
     context_chars: int | None = None,
-    async_mode: bool = False,
-    auto: bool = False,
+    async_mode: bool = True,
+    auto: bool = True,
+    session_id: str | None = None,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
 
-    return register_magic(
+    register_magic(
         name=name,
         binary=binary,
         env=env,
@@ -243,8 +312,10 @@ def use(
         context_chars=context_chars,
         async_mode=async_mode,
         auto=auto,
+        session_id=session_id,
         ipython=ipython,
     )
+    return None  # type: ignore[return-value]
 
 
 def _worker_loop() -> None:
@@ -257,6 +328,16 @@ def _worker_loop() -> None:
             request = _CODEX_QUEUE.get(timeout=0.5)
             if request is None:  # Poison pill to stop worker
                 break
+            with _CANCELLED_LOCK:
+                if request.request_id in _CANCELLED_REQUESTS:
+                    _render_async_status(
+                        request.display_id,
+                        request.request_id,
+                        "Cancelled.",
+                        cancellable=False,
+                    )
+                    _CANCELLED_REQUESTS.discard(request.request_id)
+                    continue
             _process_codex_request(request)
         except queue.Empty:
             continue
@@ -289,15 +370,59 @@ def _stop_worker_thread() -> None:
     _WORKER_THREAD = None
 
 
+def _cancel_request(request_id: str, display_id: str) -> None:
+    with _CANCELLED_LOCK:
+        _CANCELLED_REQUESTS.add(request_id)
+    try:
+        update_display(
+            HTML('<div style="color: #888;">Cancelled.</div>'), display_id=display_id
+        )
+    except Exception:
+        pass
+
+
+def _render_async_status(
+    display_id: str, request_id: str, status: str, *, cancellable: bool
+) -> None:
+    try:
+        import ipywidgets as widgets  # type: ignore
+    except Exception:
+        display(
+            HTML(f'<div style="color: #888;">{status}</div>'), display_id=display_id
+        )
+        return
+
+    status_html = widgets.HTML(f'<div style="color: #888;">{status}</div>')
+    if cancellable:
+        btn = widgets.Button(
+            description="Cancel",
+            button_style="warning",
+            layout=widgets.Layout(width="70px", height="28px", padding="0px 4px"),
+        )
+        btn.on_click(lambda _b: _cancel_request(request_id, display_id))
+        display(widgets.HBox([status_html, btn]), display_id=display_id)
+    else:
+        display(status_html, display_id=display_id)
+
+
 def _process_codex_request(request: CodexRequest) -> None:
     """Process a single codex request and update display."""
+
+    def _cancel() -> None:
+        _stop_session()
+
     progress = _Progress(
         render=request.mode != "none",
-        cancel=lambda: _stop_session(),
+        _cancel=_cancel,
         display_id=request.display_id,
         initial_message=request.status_text or "Processing...",
     )
     try:
+        with _CANCELLED_LOCK:
+            if request.request_id in _CANCELLED_REQUESTS:
+                progress.finish("Cancelled.", markdown=False)
+                _CANCELLED_REQUESTS.discard(request.request_id)
+                return
         # Build full prompt with template/context
         session = _shared_session(request.runtime)
         parts = []
@@ -364,13 +489,14 @@ def register_magic(
     debug: bool = False,
     stream: bool = True,
     prompt_user: bool = False,
-    log_path: str | os.PathLike[str] | None = None,
+    log_path: str | os.PathLike[str] | None = "./cleon.log",
     cancel_path: str | os.PathLike[str] | None = None,
-    context_changes: bool = False,
+    context_changes: bool = True,
     context_cells: int | None = None,
     context_chars: int | None = None,
-    async_mode: bool = False,
-    auto: bool = False,
+    async_mode: bool = True,
+    auto: bool = True,
+    session_id: str | None = None,
     ipython=None,
 ) -> Callable[[str, str | None], Any]:
     """Register the ``%%name`` cell magic for cleon."""
@@ -383,8 +509,15 @@ def register_magic(
             "display_mode must be one of 'auto', 'markdown', 'text', or 'none'"
         )
 
-    runtime = _ensure_cleon_runtime(binary=binary, extra_env=env)
-    _configure_logging(log_path)
+    runtime = _ensure_cleon_runtime(binary=binary, extra_env=env, session_id=session_id)
+
+    # Only log by default when debug/show_events is on; otherwise keep logs off unless explicitly set
+    effective_log_path = (
+        log_path
+        if log_path is not None
+        else ("./cleon.log" if debug or show_events else None)
+    )
+    _configure_logging(effective_log_path)
     _configure_conversation_log()
     _configure_cancel(cancel_path)
     if context_changes:
@@ -415,7 +548,11 @@ def register_magic(
         if prompt.startswith("/"):
             cmd, _, rest = prompt.partition(" ")
             cmd = cmd.lower()
-            progress = _Progress(render=stream, cancel=lambda: _stop_session())
+
+            def _cancel() -> None:
+                _stop_session()
+
+            progress = _Progress(render=stream, _cancel=_cancel)
 
             # One-shot prompt (fresh process)
             if cmd in {"/fresh", "/once"}:
@@ -479,6 +616,7 @@ def register_magic(
         # Async mode: queue request and return immediately
         if async_mode:
             display_id = f"codex-{uuid.uuid4().hex[:8]}"
+            request_id = f"req-{uuid.uuid4().hex[:8]}"
 
             # Show queue position
             queue_size = _CODEX_QUEUE.qsize() if _CODEX_QUEUE else 0
@@ -487,14 +625,13 @@ def register_magic(
             else:
                 status = "🤔 Processing..."
 
-            display(
-                HTML(f'<div style="color: #888;">{status}</div>'), display_id=display_id
-            )
+            _render_async_status(display_id, request_id, status, cancellable=True)
 
             # Submit to queue
             request = CodexRequest(
                 prompt=prompt,
                 display_id=display_id,
+                request_id=request_id,
                 status_text=status,
                 context_cells=context_cells,
                 context_chars=context_chars,
@@ -508,7 +645,10 @@ def register_magic(
             return None
 
         # Synchronous mode: execute immediately
-        progress = _Progress(render=stream, cancel=lambda: _stop_session())
+        def _cancel_sync() -> None:
+            _stop_session()
+
+        progress = _Progress(render=stream, _cancel=_cancel_sync)
 
         # Build prompt with proper order: template -> context -> user prompt
         session = _shared_session(runtime)
@@ -562,8 +702,9 @@ def register_magic(
     )
     if auto:
         _enable_auto_route(ip, normalized)
-    print(f"Registered %{normalized} cell magic.")
-    return _codex_magic
+    print("Codex session started.\n")
+    help()
+    return None  # type: ignore[return-value]
 
 
 def register_codex_magic(**kwargs: Any) -> Callable[[str, str | None], Any]:
@@ -580,6 +721,26 @@ def load_ipython_extension(ipython) -> None:
     ipython.register_magic_function(
         history_magic, magic_kind="cell", magic_name="cleon_history"
     )
+
+
+def help() -> str:
+    """Return concise help text without auto-displaying in notebooks."""
+
+    text = """Add a `>` before your prompt:  
+                 
+> &gt; Whats your name?  
+I am Codex!                   
+"""
+    display(Markdown(text))
+
+
+def stop() -> str | None:
+    """Stop the shared cleon session and return the resume session id if known."""
+
+    session_id = _stop_session()
+    if _ASYNC_MODE:
+        _stop_worker_thread()
+    return session_id
 
 
 def _ensure_ipython(ipython) -> Any:
@@ -616,7 +777,7 @@ def _enable_auto_route(ip, magic_name: str) -> None:
 
 
 def _should_route_to_codex(raw_cell: str) -> bool:
-    """Return True if the cell looks like prose/natural language."""
+    """Return True only when the cell is a prefixed prompt (lines starting with '>')."""
 
     if not raw_cell:
         return False
@@ -626,48 +787,10 @@ def _should_route_to_codex(raw_cell: str) -> bool:
     if text.startswith(("%%", "%", "!", "?")):
         return False  # Respect explicit magics/shell/inspect
 
-    # Fast path: valid Python -> leave to IPython
-    try:
-        ast.parse(raw_cell)
-        return False
-    except SyntaxError:
-        pass
-
-    # If it looks like code but is broken, let Python handle the error
-    if _looks_like_code(raw_cell):
-        return False
-
-    return True
-
-
-def _looks_like_code(raw_cell: str) -> bool:
-    """Heuristic to spot code-ish text even if it doesn't parse."""
-
-    lower = raw_cell.lower()
-    keywords = (
-        "def ",
-        "class ",
-        "import ",
-        "from ",
-        "for ",
-        "while ",
-        "if ",
-        "elif ",
-        "else:",
-        "try:",
-        "except",
-        "with ",
-        "return",
-        "lambda",
-        "yield",
-    )
-    if any(kw in lower for kw in keywords):
+    lines = raw_cell.splitlines()
+    non_empty = [ln for ln in lines if ln.strip()]
+    if non_empty and all(ln.lstrip().startswith(">") for ln in non_empty):
         return True
-
-    # Operators / punctuation that usually indicate code
-    if re.search(r"[=+\-*/%<>]=|==|!=|:=|->|::|\{|\}|\[|\]|\(|\)|;", raw_cell):
-        return True
-
     return False
 
 
@@ -763,7 +886,7 @@ class _Progress:
     def __init__(
         self,
         render: bool,
-        cancel: Callable[[], None] | None = None,
+        _cancel: Callable[[], None] | None = None,
         display_id: str | None = None,
         initial_message: str | None = None,
     ) -> None:
@@ -793,7 +916,9 @@ class _Progress:
     def update(self, event: Any) -> None:
         msg = _summarize_event(event) or self.last_message
         self.last_message = msg
-        rendered = HTML(self._render_content(f"{next(self.spinner)} {msg}", spinner=True))
+        rendered = HTML(
+            self._render_content(f"{next(self.spinner)} {msg}", spinner=True)
+        )
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
             return
@@ -802,8 +927,10 @@ class _Progress:
 
     def update_message(self, message: str, *, markdown: bool = False) -> None:
         self.last_message = message
-        rendered = Markdown(message) if markdown else HTML(
-            self._render_content(message, spinner=False)
+        rendered = (
+            Markdown(message)
+            if markdown
+            else HTML(self._render_content(message, spinner=False))
         )
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
@@ -815,8 +942,10 @@ class _Progress:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
-        rendered = Markdown(message) if markdown else HTML(
-            self._render_content(message, spinner=False)
+        rendered = (
+            Markdown(message)
+            if markdown
+            else HTML(self._render_content(message, spinner=False))
         )
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
@@ -892,6 +1021,7 @@ def _ensure_cleon_runtime(
     *,
     binary: str | None,
     extra_env: Mapping[str, str] | None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve the codex CLI path and mutate process env accordingly."""
 
@@ -909,7 +1039,7 @@ def _ensure_cleon_runtime(
         )
     os.environ["CLEON_BIN"] = resolved
     runtime_env["CLEON_BIN"] = resolved
-    return {"binary": resolved, "env": runtime_env}
+    return {"binary": resolved, "env": runtime_env, "session_id": session_id}
 
 
 def _resolve_cleon_binary(explicit: str | None) -> str | None:
@@ -956,6 +1086,7 @@ def _shared_session(runtime: Mapping[str, Any]) -> SharedSession:
         _SESSION = SharedSession(
             binary=str(runtime["binary"]),
             env=runtime.get("env") or {},
+            session_id=runtime.get("session_id"),
         )
     return _SESSION
 
@@ -1106,9 +1237,13 @@ def _maybe_prompt_followup(
     if reply is None or not reply.strip():
         return
     reply = reply.strip()
+
+    def _cancel() -> None:
+        _stop_session()
+
     resp_progress = _Progress(
         render=True if mode != "none" else False,
-        cancel=lambda: _stop_session(),
+        _cancel=_cancel,
     )
     try:
         result, events = _shared_session(runtime).send(
@@ -1259,11 +1394,19 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
     return selection
 
 
-def _stop_session() -> None:
+def _stop_session() -> str | None:
     global _SESSION
-    if _SESSION is not None:
-        _SESSION.stop()
+    if _SESSION is None:
+        return None
+    _SESSION.stop()
+    session_id = _SESSION.session_id
+    resume_cmd = _SESSION.resume_command
+    if session_id:
+        if not resume_cmd:
+            resume_cmd = f"cleon --resume {session_id}"
+        print(f"To continue this session, run: {resume_cmd}")
     _SESSION = None
+    return session_id
 
 
 def _session_alive() -> bool:

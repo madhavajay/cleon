@@ -2,6 +2,7 @@
 name = "cleon"
 version = "0.1.0"
 edition = "2024"
+authors = ["Madhava Jay <me@madhavajay.com>"]
 
 [dependencies]
 anyhow = "1"

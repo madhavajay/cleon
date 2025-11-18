@@ -9,9 +9,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-export UV_VENV_CLEAR=1
-export UV_PROJECT_ENVIRONMENT="$ROOT/.lint"
-uv venv
+uv venv -p 3.13 --allow-existing
 
 uv pip install -e "$PY_ROOT"
 uv pip install ruff mypy vulture

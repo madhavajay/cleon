@@ -9,6 +9,8 @@ from .magic import (
     register_magic,
     use,
     history_magic,
+    help as help_text,
+    stop as stop_session,
 )
 from . import autoroute
 
@@ -18,7 +20,18 @@ __all__ = [
     "register_magic",
     "register_codex_magic",
     "use",
+    "stop",
     "autoroute",
     "load_ipython_extension",
     "history_magic",
+    "help",
 ]
+
+
+# Expose help() at top-level for convenience
+def help() -> str:  # type: ignore[override]
+    return help_text()
+
+
+def stop() -> str | None:
+    return stop_session()
