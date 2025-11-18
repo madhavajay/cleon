@@ -12,12 +12,11 @@ fi
 uv venv -p 3.13 --allow-existing
 
 uv pip install -e "$PY_ROOT"
-uv pip install --compile-bytecode ruff mypy vulture
+uv pip install ruff mypy vulture
 
 cd "$PY_ROOT"
 
 echo "Running ruff format..."
-uv pip install ruff
 uv run ruff format src
 
 echo "Running ruff check..."
