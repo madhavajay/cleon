@@ -136,10 +136,10 @@ jobs:
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
-          OPENSSL_NO_PKG_CONFIG: "1"
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_ALLOW_CROSS: "1"
         run: |
           ./scripts/stage_cli.sh ${{ matrix.target }}
 
@@ -154,10 +154,10 @@ jobs:
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
-          OPENSSL_NO_PKG_CONFIG: "1"
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_ALLOW_CROSS: "1"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -178,7 +178,7 @@ jobs:
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
-          OPENSSL_NO_PKG_CONFIG: "1"
+          PKG_CONFIG_ALLOW_CROSS: "1"
         run: |
           ./scripts/stage_cli.sh
 
@@ -191,7 +191,7 @@ jobs:
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
-          OPENSSL_NO_PKG_CONFIG: "1"
+          PKG_CONFIG_ALLOW_CROSS: "1"
 
       - name: Upload sdist
         uses: actions/upload-artifact@v4
