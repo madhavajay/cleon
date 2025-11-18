@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import select
 from typing import Any, Callable, Iterable, Mapping
+import importlib.resources as importlib_resources
 
 try:  # pragma: no cover - optional import when IPython is available
     from IPython import get_ipython  # type: ignore
@@ -1196,6 +1197,16 @@ def _resolve_cleon_binary(explicit: str | None) -> str | None:
     env_value = os.environ.get("CLEON_BIN")
     if env_value:
         candidates.append(env_value)
+
+    # Bundled binary inside the wheel (src/cleon/bin)
+    try:
+        pkg_bin = importlib_resources.files(__package__).joinpath("bin")
+        for name in ("cleon.exe", "cleon"):
+            cand = pkg_bin / name
+            if cand.is_file():
+                candidates.append(str(cand))
+    except Exception:
+        pass
 
     which_value = shutil.which("cleon")
     if which_value:
