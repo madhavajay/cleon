@@ -44,21 +44,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
       - name: Set up Python
-        run: uv python install 3.9
-
-      - name: Install dependencies
-        run: |
-          cd python
-          uv sync --all-extras
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Run Python linting
-        run: bash lint.sh
+        shell: bash
+        run: ./lint.sh
 
   test:
     runs-on: ${{ matrix.os }}
