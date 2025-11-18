@@ -93,6 +93,7 @@ jobs:
       - name: Build with Maturin
         run: |
           cd python
+          uv venv
           uv pip install maturin
           uv run maturin develop
 
