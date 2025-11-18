@@ -56,6 +56,7 @@ _ORIG_RUN_CELL = None
 _CANCELLED_REQUESTS: set[str] = set()
 _CANCELLED_LOCK = threading.Lock()
 _CANCEL_ALL = threading.Event()
+_PENDING_REQUESTS: dict[str, str] = {}
 
 
 @dataclass
@@ -107,13 +108,26 @@ class SharedSession:
         )
 
     def stop(self) -> None:
-        # Try to let the process flush resume info before killing it.
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.terminate()
-                # Drain any trailing stdout to capture session metadata (e.g., resume info)
+                # Gracefully close stdin to let the CLI exit and emit resume info
+                if self.proc.stdin:
+                    try:
+                        self.proc.stdin.close()
+                    except Exception:
+                        pass
+                # Drain stdout while waiting for graceful exit
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    if self.proc.poll() is not None:
+                        break
+                    self._drain_stdout(capture_metadata=True)
+                    time.sleep(0.05)
+                # Final drain after exit or timeout
                 self._drain_stdout(capture_metadata=True)
-                self.proc.wait(timeout=2)
+                if self.proc.poll() is None:
+                    self.proc.terminate()
+                    self._drain_stdout(capture_metadata=True)
             except Exception:
                 try:
                     self._drain_stdout(capture_metadata=True)
@@ -323,7 +337,7 @@ def _worker_loop() -> None:
     global _CODEX_QUEUE
     while True:
         try:
-            if _CODEX_QUEUE is None:
+            if _CODEX_QUEUE is None or _CANCEL_ALL.is_set():
                 break
             request = _CODEX_QUEUE.get(timeout=0.5)
             if request is None:  # Poison pill to stop worker
@@ -337,8 +351,20 @@ def _worker_loop() -> None:
                         cancellable=False,
                     )
                     _CANCELLED_REQUESTS.discard(request.request_id)
+                    _PENDING_REQUESTS.pop(request.request_id, None)
+                    continue
+                if _CANCEL_ALL.is_set():
+                    _render_async_status(
+                        request.display_id,
+                        request.request_id,
+                        "Cancelled.",
+                        cancellable=False,
+                    )
+                    _PENDING_REQUESTS.pop(request.request_id, None)
                     continue
             _process_codex_request(request)
+            with _CANCELLED_LOCK:
+                _PENDING_REQUESTS.pop(request.request_id, None)
         except queue.Empty:
             continue
         except Exception:
@@ -351,6 +377,7 @@ def _start_worker_thread() -> None:
     global _CODEX_QUEUE, _WORKER_THREAD
     if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
         return
+    _CANCEL_ALL.clear()
     if _CODEX_QUEUE is None:
         _CODEX_QUEUE = queue.Queue()
     _WORKER_THREAD = threading.Thread(
@@ -373,12 +400,63 @@ def _stop_worker_thread() -> None:
 def _cancel_request(request_id: str, display_id: str) -> None:
     with _CANCELLED_LOCK:
         _CANCELLED_REQUESTS.add(request_id)
+        _PENDING_REQUESTS.pop(request_id, None)
     try:
         update_display(
             HTML('<div style="color: #888;">Cancelled.</div>'), display_id=display_id
         )
     except Exception:
         pass
+
+
+def _cancel_all(display_id: str | None = None) -> None:
+    _CANCEL_ALL.set()
+    with _CANCELLED_LOCK:
+        for rid in list(_PENDING_REQUESTS.keys()):
+            _CANCELLED_REQUESTS.add(rid)
+            disp_id = _PENDING_REQUESTS.get(rid)
+            if disp_id:
+                try:
+                    update_display(
+                        HTML('<div style="color: #888;">Cancelled all.</div>'),
+                        display_id=disp_id,
+                    )
+                except Exception:
+                    pass
+        _PENDING_REQUESTS.clear()
+    # Drain any queued requests
+    if _CODEX_QUEUE is not None:
+        try:
+            while True:
+                req = _CODEX_QUEUE.get_nowait()
+                if isinstance(req, CodexRequest):
+                    try:
+                        update_display(
+                            HTML('<div style="color: #888;">Cancelled all.</div>'),
+                            display_id=req.display_id,
+                        )
+                    except Exception:
+                        pass
+                if req is None:
+                    break
+        except queue.Empty:
+            pass
+    if display_id:
+        try:
+            update_display(
+                HTML('<div style="color: #888;">Cancelled all.</div>'),
+                display_id=display_id,
+            )
+        except Exception:
+            pass
+
+
+def _reset_cancellations() -> None:
+    _CANCEL_ALL.clear()
+    with _CANCELLED_LOCK:
+        _CANCELLED_REQUESTS.clear()
+        _PENDING_REQUESTS.clear()
+    _start_worker_thread()
 
 
 def _render_async_status(
@@ -400,7 +478,13 @@ def _render_async_status(
             layout=widgets.Layout(width="70px", height="28px", padding="0px 4px"),
         )
         btn.on_click(lambda _b: _cancel_request(request_id, display_id))
-        display(widgets.HBox([status_html, btn]), display_id=display_id)
+        cancel_all = widgets.Button(
+            description="Cancel All",
+            button_style="warning",
+            layout=widgets.Layout(width="90px", height="28px", padding="0px 4px"),
+        )
+        cancel_all.on_click(lambda _b: _cancel_all(display_id))
+        display(widgets.HBox([status_html, btn, cancel_all]), display_id=display_id)
     else:
         display(status_html, display_id=display_id)
 
@@ -419,9 +503,14 @@ def _process_codex_request(request: CodexRequest) -> None:
     )
     try:
         with _CANCELLED_LOCK:
+            if _CANCEL_ALL.is_set():
+                progress.finish("Cancelled.", markdown=False)
+                _PENDING_REQUESTS.pop(request.request_id, None)
+                return
             if request.request_id in _CANCELLED_REQUESTS:
                 progress.finish("Cancelled.", markdown=False)
                 _CANCELLED_REQUESTS.discard(request.request_id)
+                _PENDING_REQUESTS.pop(request.request_id, None)
                 return
         # Build full prompt with template/context
         session = _shared_session(request.runtime)
@@ -615,8 +704,11 @@ def register_magic(
 
         # Async mode: queue request and return immediately
         if async_mode:
+            _reset_cancellations()
             display_id = f"codex-{uuid.uuid4().hex[:8]}"
             request_id = f"req-{uuid.uuid4().hex[:8]}"
+            with _CANCELLED_LOCK:
+                _PENDING_REQUESTS[request_id] = display_id
 
             # Show queue position
             queue_size = _CODEX_QUEUE.qsize() if _CODEX_QUEUE else 0
@@ -895,9 +987,8 @@ class _Progress:
         self.last_message = initial_message or "Working..."
         self.last_result_text: str = ""
         self._stop = threading.Event()
-        self._thread = (
-            threading.Thread(target=self._loop, daemon=True) if render else None
-        )
+        self._cancel = _cancel
+        self._thread = threading.Thread(target=self._loop, daemon=True) if render else None
         if self._thread is not None:
             self._thread.start()
         if render:
@@ -1088,6 +1179,9 @@ def _shared_session(runtime: Mapping[str, Any]) -> SharedSession:
             env=runtime.get("env") or {},
             session_id=runtime.get("session_id"),
         )
+    if _SESSION.proc is None and not _SESSION.first_turn:
+        msg = "cleon session stopped. Start a new session with cleon.use(..., session_id=...) to resume or cleon.use(...) to start fresh."
+        raise RuntimeError(msg)
     return _SESSION
 
 
