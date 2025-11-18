@@ -92,17 +92,10 @@ jobs:
 
       - name: Build with Maturin
         run: |
-          cd python
           uv venv
           uv pip install maturin
           uv run -- maturin develop
 
-      - name: Install dependencies
-        run: |
-          cd python
-          uv pip install -r requirements-dev.txt
-
       - name: Run tests
         run: |
-          cd python
-          uv run pytest
+          ./test.sh

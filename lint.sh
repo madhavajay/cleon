@@ -17,15 +17,16 @@ uv pip install --compile-bytecode ruff mypy vulture
 cd "$PY_ROOT"
 
 echo "Running ruff format..."
-uv run -- ruff format src
+uv pip install ruff
+uv run ruff format src
 
 echo "Running ruff check..."
-uv run -- ruff check --fix src
+uv run ruff check --fix src
 
 echo "Running mypy..."
-uv run -- mypy src
+uv run mypy src
 
 echo "Running vulture to detect dead code..."
-uv run -- vulture src --min-confidence 80
+uv run vulture src --min-confidence 80
 
 echo "✓ All linting checks passed!"
