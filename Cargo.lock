@@ -618,7 +618,7 @@ checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
 name = "cleon"
-version = "0.1.0"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -642,7 +642,6 @@ dependencies = [
  "clap",
  "codex-protocol",
  "mcp-types",
- "paste",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -891,6 +890,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-protocol",
  "eventsource-stream",
+ "http",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
@@ -1013,6 +1013,7 @@ name = "codex-windows-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "codex-protocol",
  "dirs-next",
  "dunce",
  "rand 0.8.5",
@@ -3605,6 +3606,7 @@ version = "0.23.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "533f54bc6a7d4f647e46ad909549eda97bf5afc1585190ef692b4286b198bd8f"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4558,8 +4560,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-native-certs",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
