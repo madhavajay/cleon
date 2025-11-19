@@ -122,4 +122,4 @@ jobs:
           uv venv
           uv pip install maturin
           uv run -- maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/cleon/Cargo.toml --out dist
-          ls -l dist/**/*.whl
+          ls -l dist/*.whl
