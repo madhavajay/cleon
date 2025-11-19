@@ -95,3 +95,31 @@ jobs:
       - name: Run tests
         run: |
           ./test.sh
+
+  wheel-aarch64-check:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install uv and maturin
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build aarch64 wheel (smoke test)
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+        run: |
+          ./scripts/stage_cli.sh aarch64-unknown-linux-gnu
+          uv venv
+          uv pip install maturin
+          uv run -- maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/cleon/Cargo.toml --out dist
+          ls -l dist/*.whl
