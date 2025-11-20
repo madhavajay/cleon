@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import select
 import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -16,6 +18,10 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 import importlib.resources as importlib_resources
 
 from ._cleon import run as cleon_run  # type: ignore[import-not-found]
+from .settings import (
+    get_agent_settings,
+    get_cleon_home,
+)
 
 
 class AgentBackend(Protocol):
@@ -378,6 +384,251 @@ def _resolve_cleon_binary(explicit: str | None) -> str | None:
     return None
 
 
+def _resolve_pi_command(config: Any) -> list[str]:
+    if isinstance(config, str):
+        return [config]
+    if isinstance(config, Iterable):
+        cmd = [str(part) for part in config]
+        if cmd:
+            return cmd
+    pi_path = shutil.which("pi")
+    if pi_path:
+        return [pi_path]
+    return ["npx", "pi"]
+
+
+class PiProcess:
+    def __init__(self, settings: Mapping[str, Any], extra_env: Mapping[str, str] | None) -> None:
+        self._settings = settings
+        self._env = os.environ.copy()
+        if extra_env:
+            for key, value in extra_env.items():
+                self._env[str(key)] = str(value)
+        env_override = settings.get("env")
+        if isinstance(env_override, Mapping):
+            for key, value in env_override.items():
+                self._env[str(key)] = str(value)
+        self._cmd = _resolve_pi_command(settings.get("command"))
+        self._cwd = Path(settings.get("cwd") or os.getcwd())
+        self._timeout = float(settings.get("response_timeout") or 240.0)
+        self._queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._proc: subprocess.Popen[str] | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._start()
+
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _build_command(self) -> list[str]:
+        cmd = list(self._cmd)
+        arg_setting = self._settings.get("args")
+        extra_args: list[str] = []
+        if isinstance(arg_setting, str):
+            extra_args = [arg_setting]
+        elif isinstance(arg_setting, Iterable):
+            extra_args = [str(part) for part in arg_setting]
+        base_args = ["--mode", "rpc"]
+        if self._settings.get("no_session", True):
+            base_args.append("--no-session")
+        provider = self._settings.get("provider")
+        if provider:
+            base_args.extend(["--provider", str(provider)])
+        model = self._settings.get("model")
+        if model:
+            base_args.extend(["--model", str(model)])
+        system_prompt = self._settings.get("system_prompt")
+        if system_prompt:
+            base_args.extend(["--system-prompt", str(system_prompt)])
+        combined = cmd + base_args + extra_args
+        return [str(part) for part in combined]
+
+    def _start(self) -> None:
+        command = self._build_command()
+        try:
+            self._proc = subprocess.Popen(
+                command,
+                cwd=str(self._cwd),
+                env=self._env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Failed to launch pi CLI. Install it via `npm install -g @mariozechner/pi-coding-agent` "
+                "or set agents.claude.command in cleon.settings()."
+            ) from exc
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _read_stdout(self) -> None:
+        proc = self._proc
+        if not proc or not proc.stdout:
+            return
+        try:
+            for line in proc.stdout:
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line.strip())
+                except Exception:
+                    continue
+                self._queue.put(parsed)
+        finally:
+            self._queue.put({"type": "pi.process_exit"})
+
+    def _read_stderr(self) -> None:
+        proc = self._proc
+        if not proc or not proc.stderr:
+            return
+        try:
+            for _ in proc.stderr:
+                continue
+        finally:
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+        self._proc = None
+
+    def restart(self) -> None:
+        """Restart the pi CLI process to pick up fresh auth/config without kernel restarts."""
+        self.stop()
+        self._queue = queue.Queue()
+        self._start()
+
+    def _send(self, payload: dict[str, Any]) -> None:
+        proc = self._proc
+        if not proc or proc.stdin is None:
+            raise RuntimeError("pi backend is not running.")
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to send request to pi backend: {exc}") from exc
+
+    def send_prompt(
+        self,
+        prompt: str,
+        on_event: Callable[[Any], None] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        self._send({"type": "prompt", "message": prompt})
+        events: list[dict[str, Any]] = []
+        final_message: dict[str, Any] | None = None
+        while True:
+            try:
+                raw = self._queue.get(timeout=self._timeout)
+            except queue.Empty:
+                raise RuntimeError("Timed out waiting for pi response.")
+            if not isinstance(raw, Mapping):
+                # Some pi CLI invocations (e.g., when the CLI is missing) can emit plain
+                # numbers before exiting; ignore any non-mapping payloads so we can
+                # surface a meaningful error instead of crashing.
+                continue
+            if raw.get("type") == "pi.process_exit":
+                raise RuntimeError("pi backend exited unexpectedly.")
+            if raw.get("type") == "error":
+                raise RuntimeError(raw.get("error") or "pi backend reported an error.")
+            translated = _translate_pi_event(raw)
+            events.append(translated)
+            if on_event:
+                try:
+                    on_event(translated)
+                except Exception:
+                    pass
+            if raw.get("type") == "turn_end":
+                final_message = raw.get("message")
+                break
+        final_text = _extract_pi_text(final_message) if final_message else ""
+        if not final_text:
+            final_text = "Claude response completed."
+        result = {"final_message": final_text, "agent": "claude"}
+        return result, events
+
+
+class PiBackend:
+    name = "claude"
+    supports_async = False
+
+    def __init__(
+        self,
+        *,
+        binary: str | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        settings = get_agent_settings("claude")
+        self._process = PiProcess(settings, extra_env)
+        self._send_lock = threading.Lock()
+        self._first_turn = True
+
+    def first_turn(self) -> bool:
+        return self._first_turn
+
+    def send(
+        self,
+        prompt: str,
+        *,
+        on_event: Callable[[Any], None] | None = None,
+        on_approval: Callable[[dict[str, Any]], str | None] | None = None,
+    ) -> tuple[Any, list[Any]]:
+        del on_approval
+        with self._send_lock:
+            retry_once = True
+            while True:
+                try:
+                    return self._process.send_prompt(prompt, on_event=on_event)
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    transient = (
+                        "pi backend exited unexpectedly" in msg
+                        or "pi backend is not running" in msg
+                    )
+                    if transient and retry_once:
+                        retry_once = False
+                        try:
+                            self._process.restart()
+                            continue
+                        except Exception:
+                            pass
+                    raise
+                finally:
+                    self._first_turn = False
+
+    def run_once(self, prompt: str) -> tuple[Any, list[Any]]:
+        return self.send(prompt)
+
+    def stop(self) -> SessionStopInfo:
+        self._process.stop()
+        return SessionStopInfo(None, None)
+
+    def restart(self) -> None:
+        """Restart the underlying pi process and reset first-turn state."""
+        with self._send_lock:
+            self._process.restart()
+            self._first_turn = True
+
+    def session_alive(self) -> bool:
+        return self._process.alive
+
+
 def resolve_backend(
     *,
     agent: str,
@@ -388,4 +639,51 @@ def resolve_backend(
     agent_name = agent.lower()
     if agent_name in {"codex", "default"}:
         return CodexBackend(binary=binary, extra_env=extra_env, session_id=session_id)
+    if agent_name in {"claude", "anthropic"}:
+        return PiBackend(binary=binary, extra_env=extra_env, session_id=session_id)
     raise ValueError(f"Unknown cleon backend '{agent}'.")
+
+
+def _translate_pi_event(event: dict[str, Any]) -> dict[str, Any]:
+    etype = event.get("type")
+    if not isinstance(etype, str):
+        return {"type": "claude.event", "event": event}
+    payload: dict[str, Any] = {"type": f"claude.{etype}"}
+    if etype in {"message_start", "message_update", "message_end", "turn_end"}:
+        message = event.get("message")
+        payload["text"] = _extract_pi_text(message)
+        payload["raw"] = message
+    if etype == "tool_execution_start":
+        payload.update(
+            {
+                "tool": event.get("toolName"),
+                "args": event.get("args"),
+                "tool_call_id": event.get("toolCallId"),
+            }
+        )
+    if etype == "tool_execution_end":
+        payload.update(
+            {
+                "tool": event.get("toolName"),
+                "result": event.get("result"),
+                "error": event.get("isError"),
+                "tool_call_id": event.get("toolCallId"),
+            }
+        )
+    if etype in {"agent_start", "agent_end", "turn_start"}:
+        payload.update({k: v for k, v in event.items() if k != "type"})
+    return payload
+
+
+def _extract_pi_text(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    parts: list[str] = []
+    content = message.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+    elif isinstance(content, str):
+        parts.append(content)
+    return "\n".join(part.strip() for part in parts if isinstance(part, str) and part.strip())

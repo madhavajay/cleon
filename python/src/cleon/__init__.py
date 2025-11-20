@@ -21,6 +21,7 @@ from .magic import (
 )
 from . import autoroute
 from .settings import settings as settings_store
+from .oauth import login_claude
 
 __all__ = [
     "auth",
@@ -37,6 +38,7 @@ __all__ = [
     "sessions",
     "reset",
     "settings",
+    "login",
     "autoroute",
     "load_ipython_extension",
     "history_magic",
@@ -85,6 +87,12 @@ def sessions():
     return list_sessions()
 
 
+def login(agent: str = "claude"):
+    if agent.lower() in {"claude", "anthropic", "pi"}:
+        return login_claude()
+    raise ValueError(f"Unknown agent '{agent}'.")
+
+
 _AUTO_INITIALIZED = False
 
 
@@ -97,7 +105,14 @@ def _auto_register_magic() -> None:
 
         ip = get_ipython()
         if ip is not None:
-            use(ipython=ip)
+            try:
+                use(ipython=ip)
+            except Exception as exc:
+                print(f"Failed to initialize Codex magic: {exc}")
+            try:
+                register_magic(name="claude", agent="claude", ipython=ip)
+            except Exception as exc:
+                print(f"Skipping Claude auto-setup: {exc}")
             _AUTO_INITIALIZED = True
     except Exception:
         pass

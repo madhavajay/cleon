@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import html
+import importlib.resources as importlib_resources
 import json
 import itertools
 import os
@@ -37,9 +39,12 @@ except Exception:  # pragma: no cover - fallback when IPython is missing
             self.data = data
 
 
+from collections import deque
+
 from .backend import AgentBackend, resolve_backend
 from .settings import (
     get_agent_prefix,
+    get_agent_theme,
     get_session_store_path,
     template_for_agent,
     status_summary,
@@ -50,7 +55,12 @@ from .settings import (
 )
 
 DisplayMode = str
+_BACKENDS: dict[str, AgentBackend] = {}
 _ACTIVE_BACKEND: AgentBackend | None = None
+_ACTIVE_BACKEND_NAME: str | None = None
+_AGENT_HISTORY: Any = {}
+_HISTORY_LIMIT = 8
+_BASE_STYLE_EMITTED = False
 _LOG_PATH: str | None = None
 _CONVERSATION_LOG_PATH: str | None = None
 _CANCEL_PATH: str | None = None
@@ -72,30 +82,36 @@ _ASYNC_IDLE.set()
 
 _AGENT_THEMES = {
     "codex": {
-        "light_bg": "#eef4ff",
-        "light_border": "#b3ccff",
-        "light_color": "#0f172a",
-        "dark_bg": "#11203a",
-        "dark_border": "#2f4f7a",
-        "dark_color": "#f5f5f5",
+        "light_bg": "#1F1F1F",
+        "light_border": "#3A3A3A",
+        "light_color": "#F5F5F5",
+        "dark_bg": "#1F1F1F",
+        "dark_border": "#3A3A3A",
+        "dark_color": "#F5F5F5",
     },
     "claude": {
-        "light_bg": "#fff4e5",
-        "light_border": "#ffd8a8",
-        "light_color": "#341500",
-        "dark_bg": "#2b1a06",
-        "dark_border": "#704216",
-        "dark_color": "#fef3e7",
+        "light_bg": "#262624",
+        "light_border": "#4A4A45",
+        "light_color": "#F7F5F2",
+        "dark_bg": "#262624",
+        "dark_border": "#4A4A45",
+        "dark_color": "#F7F5F2",
     },
     "default": {
-        "light_bg": "#f4f4f5",
-        "light_border": "#d6d6da",
-        "light_color": "#111111",
-        "dark_bg": "#1f1f23",
+        "light_bg": "#1F1F23",
+        "light_border": "#3a3a40",
+        "light_color": "#F5F5F5",
+        "dark_bg": "#1F1F23",
         "dark_border": "#3a3a40",
-        "dark_color": "#f5f5f5",
+        "dark_color": "#F5F5F5",
     },
 }
+
+_AGENT_ICON_PATHS = {
+    "codex": "images/codex-white.png",
+    "claude": "images/claude.png",
+}
+_ICON_STYLES_APPLIED = False
 
 
 @dataclass
@@ -136,6 +152,9 @@ def use(
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
 
+    if agent and name == "codex":
+        name = agent
+
     register_magic(
         name=name,
         agent=agent,
@@ -159,12 +178,30 @@ def use(
     return None  # type: ignore[return-value]
 
 
-def _set_active_backend(backend: AgentBackend) -> None:
-    global _ACTIVE_BACKEND
+def _register_backend(name: str, backend: AgentBackend) -> None:
+    global _ACTIVE_BACKEND, _ACTIVE_BACKEND_NAME
+    _BACKENDS[name] = backend
+    if _ACTIVE_BACKEND is None:
+        _ACTIVE_BACKEND = backend
+        _ACTIVE_BACKEND_NAME = name
+    _ensure_base_style()
+
+
+def _select_backend(name: str) -> AgentBackend:
+    backend = _BACKENDS.get(name)
+    if backend is None:
+        raise RuntimeError(
+            f"cleon backend '{name}' is not available. Run cleon.use(agent='{name}') first."
+        )
+    global _ACTIVE_BACKEND, _ACTIVE_BACKEND_NAME
     _ACTIVE_BACKEND = backend
+    _ACTIVE_BACKEND_NAME = name
+    return backend
 
 
-def _require_backend() -> AgentBackend:
+def _require_backend(name: str | None = None) -> AgentBackend:
+    if name:
+        return _select_backend(name)
     if _ACTIVE_BACKEND is None:
         msg = (
             "<div style='background:#222;color:#f5f5f5;padding:12px;border-radius:6px;'>"
@@ -178,6 +215,44 @@ def _require_backend() -> AgentBackend:
             print("cleon session not active. Run cleon.use(...) or cleon.resume(...) first.")
         raise RuntimeError("cleon session not active.")
     return _ACTIVE_BACKEND
+
+
+def _ensure_base_style() -> None:
+    global _BASE_STYLE_EMITTED
+    if _BASE_STYLE_EMITTED:
+        return
+    css = """
+<style>
+.cleon-icon {
+    position:absolute;
+    top:8px;
+    right:10px;
+    width:18px;
+    height:18px;
+    opacity:0.7;
+    background-size:contain;
+    background-repeat:no-repeat;
+    pointer-events:none;
+}
+</style>
+"""
+    try:
+        display(HTML(css))
+        _BASE_STYLE_EMITTED = True
+    except Exception:
+        pass
+
+
+def _default_agent_name(agent: str | None = None) -> str:
+    if agent:
+        return agent.lower()
+    if _ACTIVE_BACKEND_NAME:
+        return _ACTIVE_BACKEND_NAME
+    if "codex" in _BACKENDS:
+        return "codex"
+    if _BACKENDS:
+        return next(iter(_BACKENDS.keys()))
+    return "codex"
 
 
 def _mark_async_start() -> None:
@@ -428,7 +503,7 @@ def _process_codex_request(request: CodexRequest) -> None:
     agent_name = getattr(backend, "name", "codex")
 
     def _cancel() -> None:
-        _stop_session(force=True)
+        _stop_session(backend=backend, agent=agent_name, force=True)
 
     progress = _Progress(
         render=request.mode != "none",
@@ -466,6 +541,10 @@ def _process_codex_request(request: CodexRequest) -> None:
                 _log_context_block(context_block)
                 parts.append(f"Context (changed cells):\n{context_block}")
 
+        history_block = _build_interagent_context(agent_name)
+        if history_block:
+            parts.append(history_block)
+
         # 3. User prompt
         if parts:
             parts.append(f"User prompt:\n{request.prompt}")
@@ -485,6 +564,7 @@ def _process_codex_request(request: CodexRequest) -> None:
         # Extract response and log
         response = _extract_final_message(result)
         _log_conversation(full_prompt, response)
+        _record_agent_history(agent_name, request.prompt, response)
 
         # Update cell display with result
         if request.mode != "none":
@@ -537,7 +617,7 @@ def register_magic(
     backend = resolve_backend(
         agent=backend_name, binary=binary, extra_env=env, session_id=session_id
     )
-    _set_active_backend(backend)
+    _register_backend(normalized, backend)
     agent_prefix = get_agent_prefix(backend_name)
 
     # Only log by default when debug/show_events is on; otherwise keep logs off unless explicitly set
@@ -554,6 +634,9 @@ def register_magic(
 
     # Configure async mode
     global _ASYNC_MODE
+    if async_mode and not getattr(backend, "supports_async", True):
+        print(f"Backend '{backend_name}' does not support async mode; falling back to synchronous turns.")
+        async_mode = False
     _ASYNC_MODE = async_mode
     if async_mode:
         _start_worker_thread()
@@ -573,7 +656,8 @@ def register_magic(
             print("No prompt provided.")
             return None
 
-        active_backend = _require_backend()
+        raw_user_prompt = prompt
+        active_backend = _require_backend(normalized)
         active_agent_name = getattr(active_backend, "name", "codex")
 
         # Command prefixes for mode control
@@ -582,7 +666,7 @@ def register_magic(
             cmd = cmd.lower()
 
             def _cancel() -> None:
-                _stop_session(force=True, wait_for_tasks=False)
+                _stop_session(agent=normalized, backend=active_backend, force=True, wait_for_tasks=False)
 
             progress = _Progress(render=stream, _cancel=_cancel)
 
@@ -601,7 +685,7 @@ def register_magic(
                 return result if emit_events else None
 
             if cmd == "/stop":
-                stop()
+                stop(agent=normalized)
                 if async_mode:
                     print("cleon session and async worker stopped.")
                 else:
@@ -614,8 +698,14 @@ def register_magic(
                 return alive
 
             if cmd == "/new":
-                _stop_session(keep_backend=True, force=True, wait_for_tasks=False)
-                active_backend = _require_backend()
+                _stop_session(
+                    agent=normalized,
+                    backend=active_backend,
+                    keep_backend=True,
+                    force=True,
+                    wait_for_tasks=False,
+                )
+                active_backend = _require_backend(normalized)
                 active_agent_name = getattr(active_backend, "name", "codex")
                 result, events = active_backend.send(
                     rest.strip(),
@@ -683,7 +773,7 @@ def register_magic(
 
         # Synchronous mode: execute immediately
         def _cancel_sync() -> None:
-            _stop_session(force=True, wait_for_tasks=False)
+            _stop_session(agent=normalized, backend=session_backend, force=True, wait_for_tasks=False)
 
         progress = _Progress(render=stream, _cancel=_cancel_sync)
 
@@ -706,6 +796,10 @@ def register_magic(
                 _log_context_block(context_block)
                 parts.append(f"Context (changed cells):\n{context_block}")
 
+        interagent_context = _build_interagent_context(active_agent_name)
+        if interagent_context:
+            parts.append(interagent_context)
+
         # 3. User prompt
         if parts:
             parts.append(f"User prompt:\n{prompt}")
@@ -720,12 +814,21 @@ def register_magic(
                 on_approval=_prompt_approval,
             )
         except Exception as exc:  # pragma: no cover - surfaced to notebook
-            print(f"cleon failed: {exc}")
-            raise
+            if "pi backend" in str(exc).lower():
+                msg = (
+                    "❌ Claude support requires the pi CLI. Install it with:\n\n"
+                    "`npm install -g @mariozechner/pi-coding-agent`\n\n"
+                    "Then run `cleon.login('claude')` (or set `ANTHROPIC_API_KEY`) before retrying."
+                )
+                progress.finish(msg, markdown=True)
+            else:
+                progress.finish(f"❌ {exc}", markdown=False)
+            return None
 
         # Extract response and log conversation (log full prompt with template + context)
         response = _extract_final_message(result)
         _log_conversation(prompt, response)
+        _record_agent_history(active_agent_name, raw_user_prompt, response)
 
         if mode != "none":
             _display_result(result, mode, progress, agent_name)
@@ -740,8 +843,10 @@ def register_magic(
     )
     if auto:
         _enable_auto_route(ip, normalized, backend_name, agent_prefix)
-    print("Codex session started.\n")
-    help()
+    pretty_name = backend_name.capitalize()
+    print(f"{pretty_name} session started.\n")
+    if backend_name == "codex":
+        help()
     return None  # type: ignore[return-value]
 
 
@@ -764,10 +869,13 @@ def load_ipython_extension(ipython) -> None:
 def help() -> None:
     """Return concise help text without auto-displaying in notebooks."""
 
-    text = """Add a `>` before your prompt:  
+    text = """Add a `>` or `~` before your prompt to invoke Codex or Claude:
                  
 > &gt; Whats your name?  
-I am Codex!                   
+I am Codex!
+
+~ Whats your name?
+I'm Claude, Anthropic's AI assistant!
 """
     display(Markdown(text))
 
@@ -776,7 +884,12 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
     """Stop the shared cleon session and return the resume session id if known."""
 
     wait_for_tasks = not force
-    session_id = _stop_session(agent=agent, force=force, wait_for_tasks=wait_for_tasks)
+    agent_name = _default_agent_name(agent)
+    backend = _BACKENDS.get(agent_name)
+    if backend is None:
+        print(f"No backend named '{agent_name}' is active.")
+        return None
+    session_id = _stop_session(agent=agent_name, backend=backend, force=force, wait_for_tasks=wait_for_tasks)
     if _ASYNC_MODE:
         if wait_for_tasks:
             _wait_for_async_tasks()
@@ -786,18 +899,26 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
 
 def status() -> dict[str, Any]:
     queued = _CODEX_QUEUE.qsize() if _CODEX_QUEUE is not None else 0
+    backends_status = {}
+    for name, backend in _BACKENDS.items():
+        backends_status[name] = {
+            "agent": getattr(backend, "name", name),
+            "alive": backend.session_alive(),
+        }
     runtime = {
         "active_agent": getattr(_ACTIVE_BACKEND, "name", None) if _ACTIVE_BACKEND else None,
-        "session_alive": _session_alive(),
         "async_mode": _ASYNC_MODE,
         "queued_requests": queued,
         "active_requests": _active_async_requests(),
+        "backends": backends_status,
     }
     result = {"runtime": runtime, "settings": status_summary(), "sessions": _load_session_store()}
+    current_agent = runtime["active_agent"]
+    alive = _session_alive(current_agent) if current_agent else False
     print(
         "cleon status - "
-        f"agent: {runtime['active_agent'] or 'none'}, "
-        f"session: {'alive' if runtime['session_alive'] else 'stopped'}, "
+        f"agent: {current_agent or 'none'}, "
+        f"session: {'alive' if alive else 'stopped'}, "
         f"async queued: {queued}, "
         f"in-flight: {runtime['active_requests']}"
     )
@@ -807,6 +928,7 @@ def status() -> dict[str, Any]:
 def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
     """Resume a saved cleon session (defaults to current notebook entry)."""
 
+    agent = _default_agent_name(agent)
     sid = session_id
     session_name = None
     timestamp = None
@@ -848,7 +970,8 @@ def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
 def reset() -> dict[str, Any]:
     """Stop running agents and reset cleon settings/session state."""
 
-    stop(force=True)
+    for backend_name in list(_BACKENDS.keys()):
+        stop(agent=backend_name, force=True)
     session_path = _session_store_path()
     if session_path.exists():
         try:
@@ -863,7 +986,7 @@ def reset() -> dict[str, Any]:
 def mode(name: str | None = None, *, agent: str | None = None) -> str:
     """Get or set the default mode for an agent."""
 
-    target_agent = agent or (getattr(_ACTIVE_BACKEND, "name", None) if _ACTIVE_BACKEND else None)
+    target_agent = _default_agent_name(agent)
     if name is None:
         return get_default_mode(target_agent)
     settings_default_mode(name, agent=target_agent)
@@ -881,7 +1004,7 @@ def default_mode(name: str, *, agent: str | None = None) -> dict[str, Any]:
     """Explicitly set the default mode for an agent."""
 
     normalized = name.strip().lower()
-    return settings_default_mode(normalized, agent=agent)
+    return settings_default_mode(normalized, agent=_default_agent_name(agent))
 
 
 def sessions() -> dict[str, dict[str, str]]:
@@ -933,6 +1056,59 @@ def sessions() -> dict[str, dict[str, str]]:
 
     view = _SessionView(store)
     return view
+
+
+def _record_agent_history(agent: str, prompt: str, response: str) -> None:
+    if not response.strip():
+        return
+    history_map = _ensure_history_map()
+    entry = {
+        "agent": agent,
+        "prompt": prompt.strip(),
+        "response": response.strip(),
+        "timestamp": time.time(),
+    }
+    history = history_map.setdefault(agent, deque(maxlen=_HISTORY_LIMIT))
+    history.append(entry)
+
+
+def _build_interagent_context(agent: str, limit: int = 4) -> str:
+    history_map = _ensure_history_map()
+    entries: list[dict[str, Any]] = []
+    for other_agent, history in history_map.items():
+        if other_agent == agent:
+            continue
+        entries.extend(list(history)[-limit:])
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    if not entries:
+        return ""
+    entries.sort(key=lambda e: e.get("timestamp", 0))
+    blocks = ["Other agent updates:"]
+    for entry in entries:
+        prompt = entry.get("prompt", "")
+        response = entry.get("response", "")
+        blocks.append(
+            f"Agent {entry['agent']} responded to:\n{prompt}\n\nTheir response:\n{response}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _ensure_history_map() -> dict[str, deque[dict[str, Any]]]:
+    global _AGENT_HISTORY
+    if isinstance(_AGENT_HISTORY, dict):
+        return _AGENT_HISTORY
+    converted: dict[str, deque[dict[str, Any]]] = {}
+    if isinstance(_AGENT_HISTORY, list):
+        for entry in _AGENT_HISTORY:
+            if not isinstance(entry, dict):
+                continue
+            agent_name = entry.get("agent") or "codex"
+            history = converted.setdefault(agent_name, deque(maxlen=_HISTORY_LIMIT))
+            history.append(entry)
+    else:
+        converted["codex"] = deque(maxlen=_HISTORY_LIMIT)
+    _AGENT_HISTORY = converted
+    return converted
 
 
 def _ensure_ipython(ipython) -> Any:
@@ -1066,21 +1242,36 @@ def _extract_final_message(result: Any) -> str:
 
 
 def _agent_theme(agent: str) -> dict[str, str]:
-    return _AGENT_THEMES.get(agent, _AGENT_THEMES["default"])
+    base = dict(_AGENT_THEMES.get(agent, _AGENT_THEMES["default"]))
+    overrides = get_agent_theme(agent)
+    if overrides:
+        base.update(overrides)
+    return base
 
 
-def _render_agent_block(content: str, agent: str, *, markdown: bool) -> str:
-    theme = _agent_theme(agent)
+def _render_agent_block(content: str, agent: str | None, *, markdown: bool) -> str:
+    agent_name = agent or "codex"
+    theme = _agent_theme(agent_name)
+    inner = None
     if markdown:
-        inner = Markdown(content)._repr_html_()
-    else:
+        inner = _render_markdown_html(content)
+    if not inner:
         inner = (
-            f"<pre style='margin:0;white-space:pre-wrap;font-size:0.95em;'>"
+            f"<pre style='margin:0;white-space:pre-wrap;font-size:0.95em;background:transparent;color:inherit;'>"
             f"{html.escape(content)}</pre>"
         )
+    inner = (
+        f"<div style='background:transparent;color:inherit;font-size:0.95em;line-height:1.5;'>"
+        f"{inner}</div>"
+    )
+    icon_html = ""
+    icon_ref = _agent_icon(agent_name)
+    if icon_ref:
+        icon_html = icon_ref
     unique_class = f"cleon-bubble-{agent}"
     block = f"""
-<div class="cleon-result {unique_class}" style="padding:12px;border-radius:8px;border:1px solid {theme['light_border']};background:{theme['light_bg']};color:{theme['light_color']};">
+<div class="cleon-result {unique_class}" style="position:relative;margin-left:10px;padding:12px 32px 12px 16px;border-radius:12px;border:1px solid {theme['light_border']};background:{theme['light_bg']};color:{theme['light_color']};box-shadow:0 8px 18px rgba(0,0,0,0.18);">
+{icon_html}
 {inner}
 </div>
 <style>
@@ -1096,6 +1287,40 @@ def _render_agent_block(content: str, agent: str, *, markdown: bool) -> str:
     return block
 
 
+def _render_markdown_html(content: str) -> str | None:
+    try:
+        ip = get_ipython()
+        if ip is None:
+            raise RuntimeError
+        formatter = ip.display_formatter
+        data, _ = formatter.format(Markdown(content), include={"text/html"})
+        html_output = data.get("text/html")
+        if html_output:
+            return html_output
+    except Exception:
+        pass
+    return None
+
+
+def _agent_icon(agent: str) -> str | None:
+    rel = _AGENT_ICON_PATHS.get(agent)
+    if not rel:
+        return ""
+    try:
+        data = importlib_resources.files(__package__).joinpath(rel).read_bytes()
+    except Exception:
+        return ""
+    encoded = base64.b64encode(data).decode("ascii")
+    css = f"<style>.cleon-icon-{agent} {{ background-image:url('data:image/png;base64,{encoded}'); }}</style>"
+    try:
+        display(HTML(css))
+    except Exception:
+        pass
+    return f"<span class='cleon-icon cleon-icon-{agent}'></span>"
+
+
+
+
 def _print_events(events: Any) -> None:
     if isinstance(events, Iterable) and not isinstance(events, (str, bytes)):
         for idx, event in enumerate(events, start=1):
@@ -1105,14 +1330,13 @@ def _print_events(events: Any) -> None:
 
 
 class _Progress:
-    spinner = itertools.cycle("-\\|/")
-
     def __init__(
         self,
         render: bool,
         _cancel: Callable[[], None] | None = None,
         display_id: str | None = None,
         initial_message: str | None = None,
+        agent: str | None = None,
     ) -> None:
         self.handle = None
         self.handle_id = display_id if render else None
@@ -1123,6 +1347,7 @@ class _Progress:
         self._thread = (
             threading.Thread(target=self._loop, daemon=True) if render else None
         )
+        self.agent = agent
         if self._thread is not None:
             self._thread.start()
         if render:
@@ -1130,20 +1355,20 @@ class _Progress:
                 self.handle = display(HTML(""), display_id=True)
             else:
                 update_display(HTML(initial_message or ""), display_id=display_id)
-            if initial_message:
-                self.update_message(initial_message)
+            if not self.last_message:
+                self.last_message = "Working..."
+            self.update_message(self.last_message, markdown=False)
 
     def _render_content(self, message: str, spinner: bool = False) -> str:
-        """Render content with optional spinner."""
+        if self.agent:
+            return _render_agent_block(message, self.agent, markdown=False)
         style = "color: #666; font-family: monospace;"
         return f'<div style="{style}">{message}</div>'
 
     def update(self, event: Any) -> None:
         msg = _summarize_event(event) or self.last_message
         self.last_message = msg
-        rendered = HTML(
-            self._render_content(f"{next(self.spinner)} {msg}", spinner=True)
-        )
+        rendered = HTML(self._render_content(msg, spinner=True))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
             return
@@ -1152,11 +1377,10 @@ class _Progress:
 
     def update_message(self, message: str, *, markdown: bool = False) -> None:
         self.last_message = message
-        rendered = (
-            Markdown(message)
-            if markdown
-            else HTML(self._render_content(message, spinner=False))
-        )
+        if markdown and not self.agent:
+            rendered = Markdown(message)
+        else:
+            rendered = HTML(self._render_content(message, spinner=False))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
             return
@@ -1183,7 +1407,12 @@ class _Progress:
         while not self._stop.is_set():
             if self.handle is not None:
                 msg = self.last_message
-                self.handle.update(HTML(f"<code>{next(self.spinner)} {msg}</code>"))
+                if self.agent:
+                    self.handle.update(
+                        HTML(_render_agent_block(msg, self.agent, markdown=False))
+                    )
+                else:
+                    self.handle.update(HTML(f"<code>{msg}</code>"))
             time.sleep(0.2)
 
 
@@ -1400,7 +1629,7 @@ def _maybe_prompt_followup(
     reply = reply.strip()
 
     def _cancel() -> None:
-        _stop_session(force=True, wait_for_tasks=False)
+        _stop_session(backend=backend, agent=agent, force=True, wait_for_tasks=False)
 
     resp_progress = _Progress(
         render=True if mode != "none" else False,
@@ -1416,6 +1645,7 @@ def _maybe_prompt_followup(
         return
     _display_result(result, mode, resp_progress, agent)
     _print_events(events)
+    _record_agent_history(agent, reply, _extract_final_message(result))
     return
 
 
@@ -1559,41 +1789,47 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
 def _stop_session(
     *,
     agent: str | None = None,
+    backend: AgentBackend | None = None,
     keep_backend: bool = False,
     force: bool = False,
     wait_for_tasks: bool = True,
 ) -> str | None:
-    global _ACTIVE_BACKEND
-    backend = _ACTIVE_BACKEND
-    if backend is None:
-        return None
-    if agent and getattr(backend, "name", None) != agent:
+    global _ACTIVE_BACKEND, _ACTIVE_BACKEND_NAME
+    target_backend = backend
+    backend_name = agent
+    if target_backend is None:
+        name = agent or _ACTIVE_BACKEND_NAME or "codex"
+        backend_name = name
+        target_backend = _BACKENDS.get(name)
+    if target_backend is None:
         return None
     if force:
         _cancel_all()
     elif wait_for_tasks:
         _wait_for_async_tasks()
-    info = backend.stop()
+    info = target_backend.stop()
     session_id = info.session_id
     resume_cmd = info.resume_command
-    if session_id:
+    if session_id and backend_name in {"codex", None} and getattr(target_backend, "name", "") == "codex":
         if not resume_cmd:
             resume_cmd = f"cleon --resume {session_id}"
-        _persist_session_id(session_id, resume_cmd, backend.name)
+        _persist_session_id(session_id, resume_cmd, target_backend.name)
         print(
             "Session stopped.\n"
             "You can resume with:\n"
-            f'  cleon.use("{backend.name}", session_id="{session_id}")\n'
+            f'  cleon.use("{target_backend.name}", session_id="{session_id}")\n'
             "or\n"
             "  cleon.resume()"
         )
-    if not keep_backend:
-        _ACTIVE_BACKEND = None
+    if not keep_backend and backend_name and backend_name in _BACKENDS:
+        if _ACTIVE_BACKEND_NAME == backend_name:
+            _ACTIVE_BACKEND_NAME = None
+            _ACTIVE_BACKEND = None
     return session_id
 
 
-def _session_alive() -> bool:
-    backend = _ACTIVE_BACKEND
+def _session_alive(agent: str | None = None) -> bool:
+    backend = _BACKENDS.get(_default_agent_name(agent)) if agent else _ACTIVE_BACKEND
     if backend is None:
         return False
     return backend.session_alive()

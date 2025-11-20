@@ -7,7 +7,7 @@ name = "cleon"
 version = "0.1.9"
 description = "A Genetic Dynasty of Agentic Clones for Jupyter Notebooks"
 requires-python = ">=3.9"
-dependencies = ["ipython>=8.0"]
+dependencies = ["ipython>=8.0", "websocket-client>=1.6"]
 authors = [{ name = "Madhava Jay", email = "me@madhavajay.com" }]
 keywords = ["codex", "cleon", "ipython"]
 
@@ -21,4 +21,5 @@ include = [
     "src/cleon/py.typed",
     "src/cleon/_cleon.pyi",
     "src/cleon/bin/*",
+    "src/cleon/images/*",
 ]

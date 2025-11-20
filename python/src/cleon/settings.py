@@ -11,8 +11,48 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "default_agent": "codex",
     "default_mode": "learn",
     "agents": {
-        "codex": {"prefix": ">", "default_mode": "learn", "binary": None},
-        "claude": {"prefix": "~", "default_mode": "learn", "binary": None},
+        "codex": {
+            "prefix": ">",
+            "default_mode": "learn",
+            "binary": None,
+            "theme": {
+                "light_bg": "#1F1F1F",
+                "light_border": "#3A3A3A",
+                "light_color": "#F5F5F5",
+                "dark_bg": "#1F1F1F",
+                "dark_border": "#3A3A3A",
+                "dark_color": "#F5F5F5",
+            },
+        },
+        "claude": {
+            "prefix": "~",
+            "default_mode": "learn",
+            "binary": None,
+            "connection_url": None,
+            "server_dir": None,
+            "anthropic_api_key": None,
+            "server_command": None,
+            "query_config": {},
+            "system_prompt": (
+                "You are Claude, Anthropic's coding-focused assistant, answering from inside a Jupyter notebook via Cleon. "
+                "Never refer to yourself as Pi or pi-coding-agent. Keep replies concise, focus on the requested code/task, "
+                "and mention when you ran shell commands or edited files."
+            ),
+            "allowed_tools": None,
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "args": [],
+            "no_session": True,
+            "response_timeout": 240,
+            "theme": {
+                "light_bg": "#262624",
+                "light_border": "#4A4A45",
+                "light_color": "#F7F5F2",
+                "dark_bg": "#262624",
+                "dark_border": "#4A4A45",
+                "dark_color": "#F7F5F2",
+            },
+        },
     },
     "modes": {
         "learn": {
@@ -194,3 +234,13 @@ def status_summary() -> dict[str, Any]:
         "modes": data.get("modes", {}),
         "default_mode": data.get("default_mode", "learn"),
     }
+
+
+def get_agent_theme(agent: str) -> dict[str, str]:
+    data = load_settings()
+    agents = data.get("agents", {})
+    entry = agents.get(agent, {})
+    theme = entry.get("theme")
+    if isinstance(theme, dict):
+        return {str(k): str(v) for k, v in theme.items()}
+    return {}

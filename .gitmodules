@@ -1,3 +1,6 @@
 [submodule "codex"]
 	path = codex
 	url = https://github.com/openai/codex
+[submodule "pi-mono"]
+	path = pi-mono
+	url = https://github.com/badlogic/pi-mono.git
