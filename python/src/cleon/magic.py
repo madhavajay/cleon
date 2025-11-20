@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import itertools
 import os
@@ -11,11 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
-import subprocess
-import select
 from typing import Any, Callable, Iterable, Mapping
-import importlib.resources as importlib_resources
 
 try:  # pragma: no cover - optional import when IPython is available
     from IPython import get_ipython  # type: ignore
@@ -40,10 +37,20 @@ except Exception:  # pragma: no cover - fallback when IPython is missing
             self.data = data
 
 
-from ._cleon import run as cleon_run  # type: ignore[import-not-found]
+from .backend import AgentBackend, resolve_backend
+from .settings import (
+    get_agent_prefix,
+    get_session_store_path,
+    template_for_agent,
+    status_summary,
+    get_default_mode,
+    add_mode as settings_add_mode,
+    default_mode as settings_default_mode,
+    reset_settings as settings_reset,
+)
 
 DisplayMode = str
-_SESSION: "SharedSession | None" = None
+_ACTIVE_BACKEND: AgentBackend | None = None
 _LOG_PATH: str | None = None
 _CONVERSATION_LOG_PATH: str | None = None
 _CANCEL_PATH: str | None = None
@@ -51,14 +58,44 @@ _CONTEXT_TRACKER: "ContextTracker | None" = None
 _ASYNC_MODE: bool = False
 _CODEX_QUEUE: "queue.Queue[CodexRequest | None] | None" = None
 _WORKER_THREAD: threading.Thread | None = None
-_SESSION_LOCK = threading.Lock()
 _AUTO_ROUTE_INSTALLED = False
 _ORIG_RUN_CELL = None
+_AUTO_ROUTE_RULES: dict[str, tuple[str, str]] = {}
 _CANCELLED_REQUESTS: set[str] = set()
 _CANCELLED_LOCK = threading.Lock()
 _CANCEL_ALL = threading.Event()
 _PENDING_REQUESTS: dict[str, str] = {}
-_SESSION_ALLOWED = False
+_ACTIVE_ASYNC_COUNT = 0
+_ACTIVE_ASYNC_LOCK = threading.Lock()
+_ASYNC_IDLE = threading.Event()
+_ASYNC_IDLE.set()
+
+_AGENT_THEMES = {
+    "codex": {
+        "light_bg": "#eef4ff",
+        "light_border": "#b3ccff",
+        "light_color": "#0f172a",
+        "dark_bg": "#11203a",
+        "dark_border": "#2f4f7a",
+        "dark_color": "#f5f5f5",
+    },
+    "claude": {
+        "light_bg": "#fff4e5",
+        "light_border": "#ffd8a8",
+        "light_color": "#341500",
+        "dark_bg": "#2b1a06",
+        "dark_border": "#704216",
+        "dark_color": "#fef3e7",
+    },
+    "default": {
+        "light_bg": "#f4f4f5",
+        "light_border": "#d6d6da",
+        "light_color": "#111111",
+        "dark_bg": "#1f1f23",
+        "dark_border": "#3a3a40",
+        "dark_color": "#f5f5f5",
+    },
+}
 
 
 @dataclass
@@ -73,226 +110,13 @@ class CodexRequest:
     context_chars: int | None
     mode: str
     emit_events: bool
-    runtime: Mapping[str, Any]
-
-
-class SharedSession:
-    """Lightweight persistent codex CLI process for multi-turn use."""
-
-    def __init__(
-        self,
-        binary: str,
-        env: Mapping[str, str] | None = None,
-        session_id: str | None = None,
-    ) -> None:
-        self.binary = binary
-        self.env = dict(env or {})
-        self.proc: subprocess.Popen[str] | None = None
-        self.first_turn: bool = True
-        self.session_id: str | None = session_id
-        self.rollout_path: str | None = None
-        self.resume_command: str | None = None
-        self.stopped: bool = False
-
-    def ensure_started(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            return
-        cmd = [self.binary, "--json-events", "--json-result"]
-        if self.session_id:
-            cmd.extend(["--resume", self.session_id])
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={**os.environ, **self.env},
-            bufsize=1,
-        )
-
-    def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            try:
-                if self.proc.stdin:
-                    try:
-                        self.proc.stdin.write("__CLEON_STOP__\n")
-                        self.proc.stdin.flush()
-                    except Exception:
-                        pass
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    if self.proc.poll() is not None:
-                        break
-                    self._drain_stdout(capture_metadata=True)
-                    time.sleep(0.05)
-                self._drain_stdout(capture_metadata=True)
-                if self.proc.poll() is None:
-                    self.proc.terminate()
-                    self._drain_stdout(capture_metadata=True)
-            except Exception:
-                try:
-                    self._drain_stdout(capture_metadata=True)
-                except Exception:
-                    pass
-                self.proc.kill()
-        self.proc = None
-        self.first_turn = True
-        self.stopped = True
-
-    def _read_lines(self) -> Iterable[str]:
-        assert self.proc is not None
-        if self.proc.stdout is None:
-            return
-        while True:
-            line = self.proc.stdout.readline()
-            if line == "":
-                break
-            yield line.strip()
-
-    def send(
-        self,
-        prompt: str,
-        on_event: Callable[[Any], None] | None = None,
-        on_approval: Callable[[dict[str, Any]], str | None] | None = None,
-    ) -> tuple[Any, list[Any]]:
-        with _SESSION_LOCK:
-            self.ensure_started()
-            assert self.proc is not None
-            # Drain any leftover stdout before sending a new prompt
-            self._drain_stdout(capture_metadata=True)
-            if self.proc.stdin is None:
-                raise RuntimeError("cleon session stdin unavailable")
-            # Interactive mode uses read_line() which stops at first \n
-            # Replace newlines with special marker so entire prompt is on one line
-            single_line_prompt = prompt.replace("\n", " ⏎ ")
-            self.proc.stdin.write(single_line_prompt + "\n")
-            self.proc.stdin.flush()
-            # Mark that we've sent at least one turn
-            self.first_turn = False
-
-            events: list[Any] = []
-            final: Any | None = None
-            for line in self._read_lines():
-                try:
-                    parsed = json.loads(line)
-                except Exception:
-                    continue
-                self._capture_session_metadata(parsed)
-                events.append(parsed)
-                if parsed.get("type") == "approval.request":
-                    if on_approval is not None:
-                        decision = on_approval(parsed)
-                        if decision:
-                            if self.proc.stdin is None:
-                                raise RuntimeError("cleon session stdin unavailable")
-                                # pragma: no cover
-                            self.proc.stdin.write(decision + "\n")
-                            self.proc.stdin.flush()
-                            continue
-                if on_event is not None:
-                    try:
-                        on_event(parsed)
-                    except Exception:
-                        pass
-                if (
-                    isinstance(parsed, dict)
-                    and parsed.get("type") == "turn.result"
-                    and "result" in parsed
-                ):
-                    final = parsed["result"]
-                    break
-
-            # Drain any trailing output the process may emit after turn.result
-            self._drain_stdout()
-            # Give the process a moment to flush any final output
-            time.sleep(0.1)
-            # Drain one more time to be sure
-            self._drain_stdout()
-
-            if final is None:
-                raise RuntimeError("cleon output missing turn.result payload")
-            return final, events
-
-    def _drain_stdout(self, capture_metadata: bool = False) -> None:
-        """Best-effort drain of any pending stdout to avoid bleed between turns."""
-        assert self.proc is not None
-        stdout = self.proc.stdout
-        if stdout is None:
-            return
-
-        def _maybe_parse(line: str) -> None:
-            if not capture_metadata:
-                return
-            try:
-                parsed = json.loads(line)
-                self._capture_session_metadata(parsed)
-            except Exception:
-                pass
-
-        try:
-            fd = stdout.fileno()
-        except Exception:
-            # Some file-like objects (e.g. StringIO in tests) don't expose fileno
-            try:
-                if hasattr(stdout, "seekable") and stdout.seekable():
-                    for _ in range(50):
-                        line = stdout.readline()
-                        if not line:
-                            break
-                        _maybe_parse(line)
-            except Exception:
-                pass
-            return
-
-        for _ in range(50):
-            ready, _, _ = select.select([fd], [], [], 0)
-            if not ready:
-                break
-            line = stdout.readline()
-            if not line:
-                break
-            _maybe_parse(line)
-
-    def _capture_session_metadata(self, payload: Any) -> None:
-        """Pull session_id/rollout_path from json payloads when present."""
-        try:
-            if isinstance(payload, dict):
-                if payload.get("type") == "session.resume":
-                    if isinstance(payload.get("session_id"), str):
-                        self.session_id = payload["session_id"]
-                    if isinstance(payload.get("resume_command"), str):
-                        self.resume_command = payload["resume_command"]
-                    if isinstance(payload.get("rollout_path"), str):
-                        self.rollout_path = payload["rollout_path"]
-                if self.session_id is None:
-                    if "session_id" in payload and isinstance(
-                        payload["session_id"], str
-                    ):
-                        self.session_id = payload["session_id"]
-                    elif (
-                        "msg" in payload
-                        and isinstance(payload["msg"], dict)
-                        and isinstance(payload["msg"].get("session_id"), str)
-                    ):
-                        self.session_id = payload["msg"]["session_id"]
-                if self.rollout_path is None:
-                    if "rollout_path" in payload and isinstance(
-                        payload["rollout_path"], str
-                    ):
-                        self.rollout_path = payload["rollout_path"]
-                    elif (
-                        "msg" in payload
-                        and isinstance(payload["msg"], dict)
-                        and isinstance(payload["msg"].get("rollout_path"), str)
-                    ):
-                        self.rollout_path = payload["msg"]["rollout_path"]
-        except Exception:
-            pass
+    backend: AgentBackend
 
 
 def use(
     name: str = "codex",
     *,
+    agent: str | None = None,
     binary: str | None = None,
     env: Mapping[str, str] | None = None,
     display_mode: DisplayMode = "auto",
@@ -312,10 +136,9 @@ def use(
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
 
-    global _SESSION_ALLOWED
-    _SESSION_ALLOWED = True
     register_magic(
         name=name,
+        agent=agent,
         binary=binary,
         env=env,
         display_mode=display_mode,
@@ -334,6 +157,60 @@ def use(
         ipython=ipython,
     )
     return None  # type: ignore[return-value]
+
+
+def _set_active_backend(backend: AgentBackend) -> None:
+    global _ACTIVE_BACKEND
+    _ACTIVE_BACKEND = backend
+
+
+def _require_backend() -> AgentBackend:
+    if _ACTIVE_BACKEND is None:
+        msg = (
+            "<div style='background:#222;color:#f5f5f5;padding:12px;border-radius:6px;'>"
+            "<strong>cleon session not active.</strong><br/>"
+            "Run <code>cleon.use()</code> or <code>cleon.resume()</code> to start a session."
+            "</div>"
+        )
+        try:
+            display(HTML(msg))
+        except Exception:
+            print("cleon session not active. Run cleon.use(...) or cleon.resume(...) first.")
+        raise RuntimeError("cleon session not active.")
+    return _ACTIVE_BACKEND
+
+
+def _mark_async_start() -> None:
+    global _ACTIVE_ASYNC_COUNT
+    with _ACTIVE_ASYNC_LOCK:
+        _ACTIVE_ASYNC_COUNT += 1
+        _ASYNC_IDLE.clear()
+
+
+def _mark_async_done() -> None:
+    global _ACTIVE_ASYNC_COUNT
+    with _ACTIVE_ASYNC_LOCK:
+        _ACTIVE_ASYNC_COUNT = max(0, _ACTIVE_ASYNC_COUNT - 1)
+        if (_CODEX_QUEUE is None or _CODEX_QUEUE.empty()) and _ACTIVE_ASYNC_COUNT == 0:
+            _ASYNC_IDLE.set()
+
+
+def _wait_for_async_tasks() -> None:
+    if not _ASYNC_MODE:
+        return
+    while True:
+        queue_empty = _CODEX_QUEUE is None or _CODEX_QUEUE.empty()
+        with _ACTIVE_ASYNC_LOCK:
+            active = _ACTIVE_ASYNC_COUNT
+        if queue_empty and active == 0:
+            _ASYNC_IDLE.set()
+            return
+        time.sleep(0.05)
+
+
+def _active_async_requests() -> int:
+    with _ACTIVE_ASYNC_LOCK:
+        return _ACTIVE_ASYNC_COUNT
 
 
 def _worker_loop() -> None:
@@ -366,9 +243,13 @@ def _worker_loop() -> None:
                     )
                     _PENDING_REQUESTS.pop(request.request_id, None)
                     continue
-            _process_codex_request(request)
-            with _CANCELLED_LOCK:
-                _PENDING_REQUESTS.pop(request.request_id, None)
+            _mark_async_start()
+            try:
+                _process_codex_request(request)
+            finally:
+                _mark_async_done()
+                with _CANCELLED_LOCK:
+                    _PENDING_REQUESTS.pop(request.request_id, None)
         except queue.Empty:
             continue
         except Exception:
@@ -399,6 +280,7 @@ def _stop_worker_thread() -> None:
         _WORKER_THREAD.join(timeout=2.0)
     _CODEX_QUEUE = None
     _WORKER_THREAD = None
+    _ASYNC_IDLE.set()
 
 
 def _cancel_request(request_id: str, display_id: str) -> None:
@@ -453,6 +335,8 @@ def _cancel_all(display_id: str | None = None) -> None:
             )
         except Exception:
             pass
+    if _ACTIVE_ASYNC_COUNT == 0:
+        _ASYNC_IDLE.set()
 
 
 def _reset_cancellations() -> None:
@@ -461,10 +345,14 @@ def _reset_cancellations() -> None:
         _CANCELLED_REQUESTS.clear()
         _PENDING_REQUESTS.clear()
     _start_worker_thread()
+    if _CODEX_QUEUE is None or _CODEX_QUEUE.empty():
+        _ASYNC_IDLE.set()
 
 
 def _session_store_path() -> Path:
-    return Path.cwd() / ".cleon_session.json"
+    path = get_session_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _load_session_store() -> dict[str, dict[str, str]]:
@@ -477,14 +365,23 @@ def _load_session_store() -> dict[str, dict[str, str]]:
     return {}
 
 
-def _persist_session_id(session_id: str, resume_cmd: str | None) -> None:
+def _persist_session_id(session_id: str, resume_cmd: str | None, agent: str) -> None:
     try:
         store = _load_session_store()
         key = _get_notebook_name() or "default"
         store[key] = {
             "session_id": session_id,
             "resume_command": resume_cmd or "",
-            "agent": "codex",
+            "agent": agent,
+            "notebook": key,
+            "timestamp": time.time(),
+        }
+        store["_last"] = {
+            "session_id": session_id,
+            "resume_command": resume_cmd or "",
+            "agent": agent,
+            "notebook": key,
+            "timestamp": time.time(),
         }
         path = _session_store_path()
         path.write_text(
@@ -527,8 +424,11 @@ def _render_async_status(
 def _process_codex_request(request: CodexRequest) -> None:
     """Process a single codex request and update display."""
 
+    backend = request.backend
+    agent_name = getattr(backend, "name", "codex")
+
     def _cancel() -> None:
-        _stop_session()
+        _stop_session(force=True)
 
     progress = _Progress(
         render=request.mode != "none",
@@ -548,12 +448,11 @@ def _process_codex_request(request: CodexRequest) -> None:
                 _PENDING_REQUESTS.pop(request.request_id, None)
                 return
         # Build full prompt with template/context
-        session = _shared_session(request.runtime)
         parts = []
 
         # 1. Template (first turn only)
-        if session.first_turn:
-            template = _load_template()
+        if backend.first_turn():
+            template = _resolve_template(agent_name)
             if template:
                 _log_template(template)
                 parts.append(template)
@@ -576,8 +475,8 @@ def _process_codex_request(request: CodexRequest) -> None:
 
         _log_prompt(full_prompt)
 
-        # Send to codex
-        result, events = session.send(
+        # Send to backend
+        result, events = backend.send(
             full_prompt,
             on_event=_chain(progress.update, _log_event),
             on_approval=_prompt_approval,
@@ -589,7 +488,7 @@ def _process_codex_request(request: CodexRequest) -> None:
 
         # Update cell display with result
         if request.mode != "none":
-            _display_result(result, request.mode, progress)
+            _display_result(result, request.mode, progress, agent_name)
 
         if request.emit_events:
             update_display(events, display_id=f"{request.display_id}-events")
@@ -606,6 +505,7 @@ def _process_codex_request(request: CodexRequest) -> None:
 def register_magic(
     *,
     name: str = "codex",
+    agent: str | None = None,
     binary: str | None = None,
     env: Mapping[str, str] | None = None,
     display_mode: DisplayMode = "auto",
@@ -633,7 +533,12 @@ def register_magic(
             "display_mode must be one of 'auto', 'markdown', 'text', or 'none'"
         )
 
-    runtime = _ensure_cleon_runtime(binary=binary, extra_env=env, session_id=session_id)
+    backend_name = (agent or normalized).lower()
+    backend = resolve_backend(
+        agent=backend_name, binary=binary, extra_env=env, session_id=session_id
+    )
+    _set_active_backend(backend)
+    agent_prefix = get_agent_prefix(backend_name)
 
     # Only log by default when debug/show_events is on; otherwise keep logs off unless explicitly set
     effective_log_path = (
@@ -668,13 +573,16 @@ def register_magic(
             print("No prompt provided.")
             return None
 
+        active_backend = _require_backend()
+        active_agent_name = getattr(active_backend, "name", "codex")
+
         # Command prefixes for mode control
         if prompt.startswith("/"):
             cmd, _, rest = prompt.partition(" ")
             cmd = cmd.lower()
 
             def _cancel() -> None:
-                _stop_session()
+                _stop_session(force=True, wait_for_tasks=False)
 
             progress = _Progress(render=stream, _cancel=_cancel)
 
@@ -684,18 +592,17 @@ def register_magic(
                 if not payload:
                     print("Usage: /fresh <prompt>")
                     return None
-                result, events = cleon_run(payload)
+                result, events = active_backend.run_once(payload)
                 _log_events(events)
                 if mode != "none":
-                    _display_result(result, mode, progress)
+                    _display_result(result, mode, progress, active_agent_name)
                 if emit_events:
                     _print_events(events)
                 return result if emit_events else None
 
             if cmd == "/stop":
-                _stop_session()
+                stop()
                 if async_mode:
-                    _stop_worker_thread()
                     print("cleon session and async worker stopped.")
                 else:
                     print("cleon session stopped.")
@@ -707,14 +614,16 @@ def register_magic(
                 return alive
 
             if cmd == "/new":
-                _stop_session()
-                result, events = _shared_session(runtime).send(
+                _stop_session(keep_backend=True, force=True, wait_for_tasks=False)
+                active_backend = _require_backend()
+                active_agent_name = getattr(active_backend, "name", "codex")
+                result, events = active_backend.send(
                     rest.strip(),
                     on_event=_chain(progress.update, _log_event),
                     on_approval=_prompt_approval,
                 )
                 if mode != "none":
-                    _display_result(result, mode, progress)
+                    _display_result(result, mode, progress, active_agent_name)
                 if emit_events:
                     _print_events(events)
                 return result if emit_events else None
@@ -756,6 +665,7 @@ def register_magic(
 
             # Submit to queue
             request = CodexRequest(
+                backend=active_backend,
                 prompt=prompt,
                 display_id=display_id,
                 request_id=request_id,
@@ -764,26 +674,27 @@ def register_magic(
                 context_chars=context_chars,
                 mode=mode,
                 emit_events=emit_events,
-                runtime=runtime,
             )
             if _CODEX_QUEUE is not None:
                 _CODEX_QUEUE.put(request)
+                _ASYNC_IDLE.clear()
 
             return None
 
         # Synchronous mode: execute immediately
         def _cancel_sync() -> None:
-            _stop_session()
+            _stop_session(force=True, wait_for_tasks=False)
 
         progress = _Progress(render=stream, _cancel=_cancel_sync)
 
         # Build prompt with proper order: template -> context -> user prompt
-        session = _shared_session(runtime)
+        session_backend = active_backend
+        agent_name = getattr(session_backend, "name", "codex")
         parts = []
 
         # 1. Template (first turn only)
-        if session.first_turn:
-            template = _load_template()
+        if session_backend.first_turn():
+            template = _resolve_template(agent_name)
             if template:
                 _log_template(template)
                 parts.append(template)
@@ -803,7 +714,7 @@ def register_magic(
         _log_prompt(prompt)
 
         try:
-            result, events = session.send(
+            result, events = session_backend.send(
                 prompt,
                 on_event=_chain(progress.update, _log_event),
                 on_approval=_prompt_approval,
@@ -817,7 +728,7 @@ def register_magic(
         _log_conversation(prompt, response)
 
         if mode != "none":
-            _display_result(result, mode, progress)
+            _display_result(result, mode, progress, agent_name)
         if emit_events:
             _print_events(events)
         return result if emit_events else None
@@ -828,7 +739,7 @@ def register_magic(
         history_magic, magic_kind="cell", magic_name="cleon_history"
     )
     if auto:
-        _enable_auto_route(ip, normalized)
+        _enable_auto_route(ip, normalized, backend_name, agent_prefix)
     print("Codex session started.\n")
     help()
     return None  # type: ignore[return-value]
@@ -861,30 +772,167 @@ I am Codex!
     display(Markdown(text))
 
 
-def stop() -> str | None:
+def stop(agent: str | None = None, *, force: bool = False) -> str | None:
     """Stop the shared cleon session and return the resume session id if known."""
 
-    session_id = _stop_session()
+    wait_for_tasks = not force
+    session_id = _stop_session(agent=agent, force=force, wait_for_tasks=wait_for_tasks)
     if _ASYNC_MODE:
+        if wait_for_tasks:
+            _wait_for_async_tasks()
         _stop_worker_thread()
     return session_id
+
+
+def status() -> dict[str, Any]:
+    queued = _CODEX_QUEUE.qsize() if _CODEX_QUEUE is not None else 0
+    runtime = {
+        "active_agent": getattr(_ACTIVE_BACKEND, "name", None) if _ACTIVE_BACKEND else None,
+        "session_alive": _session_alive(),
+        "async_mode": _ASYNC_MODE,
+        "queued_requests": queued,
+        "active_requests": _active_async_requests(),
+    }
+    result = {"runtime": runtime, "settings": status_summary(), "sessions": _load_session_store()}
+    print(
+        "cleon status - "
+        f"agent: {runtime['active_agent'] or 'none'}, "
+        f"session: {'alive' if runtime['session_alive'] else 'stopped'}, "
+        f"async queued: {queued}, "
+        f"in-flight: {runtime['active_requests']}"
+    )
+    return result
 
 
 def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
     """Resume a saved cleon session (defaults to current notebook entry)."""
 
     sid = session_id
+    session_name = None
+    timestamp = None
     if sid is None:
         store = _load_session_store()
         key = _get_notebook_name() or "default"
-        entry = store.get(key) or store.get("default")
-        if entry and entry.get("agent") == agent:
-            sid = entry.get("session_id")
+        chosen_entry = None
+        direct_entry = store.get(key)
+        if direct_entry and direct_entry.get("agent") == agent:
+            chosen_entry = direct_entry
+        else:
+            fallback = store.get("_last")
+            if fallback and fallback.get("agent") == agent:
+                chosen_entry = fallback
+        if chosen_entry:
+            sid = chosen_entry.get("session_id")
+            session_name = chosen_entry.get("notebook")
+            timestamp = chosen_entry.get("timestamp")
     if not sid:
         print("No saved session to resume. Start a new one with cleon.use(...).")
         return None
-    use(agent, session_id=sid)
+    if session_name:
+        human_time = ""
+        if timestamp:
+            try:
+                human_time = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(float(timestamp))
+                )
+            except Exception:
+                human_time = ""
+        msg = f'Resuming session "{session_name}"'
+        if human_time:
+            msg += f" from {human_time}"
+        print(msg)
+    use(agent, agent=agent, session_id=sid)
     return sid
+
+
+def reset() -> dict[str, Any]:
+    """Stop running agents and reset cleon settings/session state."""
+
+    stop(force=True)
+    session_path = _session_store_path()
+    if session_path.exists():
+        try:
+            session_path.unlink()
+        except Exception:
+            pass
+    data = settings_reset()
+    print("cleon reset complete. Default settings restored.")
+    return data
+
+
+def mode(name: str | None = None, *, agent: str | None = None) -> str:
+    """Get or set the default mode for an agent."""
+
+    target_agent = agent or (getattr(_ACTIVE_BACKEND, "name", None) if _ACTIVE_BACKEND else None)
+    if name is None:
+        return get_default_mode(target_agent)
+    settings_default_mode(name, agent=target_agent)
+    return name
+
+
+def add_mode(name: str, template: str | None = None, *, agent: str | None = None) -> dict[str, Any]:
+    """Register a custom mode with an optional template."""
+
+    normalized = name.strip().lower()
+    return settings_add_mode(normalized, template, agent=agent)
+
+
+def default_mode(name: str, *, agent: str | None = None) -> dict[str, Any]:
+    """Explicitly set the default mode for an agent."""
+
+    normalized = name.strip().lower()
+    return settings_default_mode(normalized, agent=agent)
+
+
+def sessions() -> dict[str, dict[str, str]]:
+    """Return stored session metadata."""
+
+    store = _load_session_store()
+
+    class _SessionView(dict):
+        def __repr_html__(self) -> str:  # pragma: no cover - IPython display
+            rows = []
+            for name, meta in self.items():
+                if name.startswith("_") and name != "_last":
+                    continue
+                session_id = meta.get("session_id", "")
+                agent = meta.get("agent", "")
+                notebook = meta.get("notebook", name)
+                timestamp = meta.get("timestamp")
+                human = ""
+                if timestamp:
+                    try:
+                        human = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(float(timestamp))
+                        )
+                    except Exception:
+                        human = ""
+                rows.append(
+                    f"<tr><td>{notebook}</td><td>{agent}</td><td>{session_id}</td><td>{human}</td></tr>"
+                )
+            if not rows:
+                rows.append(
+                    "<tr><td colspan='4' style='color:#888;'>No saved sessions.</td></tr>"
+                )
+            table = """
+            <table style="border-collapse:collapse;margin-top:8px;">
+                <thead>
+                    <tr style="background:#222;color:#f5f5f5;">
+                        <th style="padding:6px 10px;border:1px solid #444;">Notebook</th>
+                        <th style="padding:6px 10px;border:1px solid #444;">Agent</th>
+                        <th style="padding:6px 10px;border:1px solid #444;">Session ID</th>
+                        <th style="padding:6px 10px;border:1px solid #444;">Saved</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+            """.format(
+                rows="".join(rows)
+            )
+            return table
+
+    view = _SessionView(store)
+    return view
 
 
 def _ensure_ipython(ipython) -> Any:
@@ -894,10 +942,12 @@ def _ensure_ipython(ipython) -> Any:
     return ip
 
 
-def _enable_auto_route(ip, magic_name: str) -> None:
-    """Intercept run_cell to auto-route natural language cells to codex cell magic."""
+def _enable_auto_route(ip, magic_name: str, agent_name: str, prefix: str) -> None:
+    """Intercept run_cell to auto-route natural language cells to cleon magics."""
 
     global _AUTO_ROUTE_INSTALLED, _ORIG_RUN_CELL
+    if prefix:
+        _AUTO_ROUTE_RULES[prefix] = (agent_name, magic_name)
     if _AUTO_ROUTE_INSTALLED:
         return
     orig = getattr(ip, "run_cell", None)
@@ -907,9 +957,10 @@ def _enable_auto_route(ip, magic_name: str) -> None:
     def _wrapped_run_cell(raw_cell, *args, **kwargs):
         try:
             text = raw_cell if isinstance(raw_cell, str) else ""
-            if _should_route_to_codex(text):
-                prompt_text = _strip_prompt_prefix(text)
-                routed_cell = f"%%{magic_name}\n{prompt_text}"
+            detected = _detect_auto_route_target(text)
+            if detected is not None:
+                target_magic, prompt_text = detected
+                routed_cell = f"%%{target_magic}\n{prompt_text}"
                 return orig(routed_cell, *args, **kwargs)
         except Exception:
             pass  # On heuristic failure, fall back to normal execution
@@ -920,42 +971,43 @@ def _enable_auto_route(ip, magic_name: str) -> None:
     _AUTO_ROUTE_INSTALLED = True
 
 
-def _should_route_to_codex(raw_cell: str) -> bool:
-    """Return True only when the cell is a prefixed prompt (lines starting with '>')."""
-
+def _detect_auto_route_target(raw_cell: str) -> tuple[str, str] | None:
     if not raw_cell:
-        return False
+        return None
     text = raw_cell.lstrip()
-    if not text:
-        return False
-    if text.startswith(("%%", "%", "!", "?")):
-        return False  # Respect explicit magics/shell/inspect
+    if not text or text.startswith(("%%", "%", "!", "?")):
+        return None
+    for prefix, (_, magic_name) in _AUTO_ROUTE_RULES.items():
+        if _cell_has_prefix(raw_cell, prefix):
+            prompt_text = _strip_prompt_prefix(raw_cell, prefix)
+            return magic_name, prompt_text
+    return None
 
+
+def _cell_has_prefix(raw_cell: str, prefix: str) -> bool:
     lines = raw_cell.splitlines()
     non_empty = [ln for ln in lines if ln.strip()]
-    if non_empty and all(ln.lstrip().startswith(">") for ln in non_empty):
-        return True
-    return False
+    if not non_empty:
+        return False
+    for ln in non_empty:
+        if not ln.lstrip().startswith(prefix):
+            return False
+    return True
 
 
-def _strip_prompt_prefix(text: str) -> str:
-    """If all non-empty lines start with '> ', strip that prefix for Codex prompts."""
-
+def _strip_prompt_prefix(text: str, prefix: str) -> str:
     lines = text.splitlines()
-    non_empty = [ln for ln in lines if ln.strip()]
-    if non_empty and all(ln.lstrip().startswith(">") for ln in non_empty):
-        stripped_lines = []
-        for ln in lines:
-            if ln.lstrip().startswith(">"):
-                # Remove leading ">" and one following space if present
-                candidate = ln.lstrip()[1:]
-                if candidate.startswith(" "):
-                    candidate = candidate[1:]
-                stripped_lines.append(candidate)
-            else:
-                stripped_lines.append(ln)
-        return "\n".join(stripped_lines)
-    return text
+    stripped_lines = []
+    for ln in lines:
+        candidate = ln.lstrip()
+        if candidate.startswith(prefix):
+            cleaned = candidate[len(prefix) :]
+            if cleaned.startswith(" "):
+                cleaned = cleaned[1:]
+            stripped_lines.append(cleaned)
+        else:
+            stripped_lines.append(ln)
+    return "\n".join(stripped_lines)
 
 
 def _normalize_payload(line: str, cell: str | None) -> str:
@@ -963,17 +1015,14 @@ def _normalize_payload(line: str, cell: str | None) -> str:
     return payload.strip()
 
 
-def _display_result(result: Any, mode: DisplayMode, progress: "_Progress") -> None:
+def _display_result(
+    result: Any, mode: DisplayMode, progress: "_Progress", agent: str
+) -> None:
     text = _extract_final_message(result)
-    if mode == "text":
-        progress.finish(text or "(no final message)")
-        return
-
-    if mode == "markdown" or (mode == "auto" and text):
-        progress.finish(text or "(no final message)", markdown=True)
-    else:
-        # In non-markdown mode, still avoid dumping raw JSON; show best-effort message.
-        progress.finish(text or "(no final message)", markdown=False)
+    use_markdown = mode == "markdown" or (mode == "auto" and text)
+    message = text or "(no final message)"
+    themed_html = _render_agent_block(message, agent, markdown=use_markdown)
+    progress.finish(themed_html, raw_html=True)
     progress.last_result_text = text or ""
 
 
@@ -1014,6 +1063,37 @@ def _extract_final_message(result: Any) -> str:
     if isinstance(result, str):
         return result
     return ""
+
+
+def _agent_theme(agent: str) -> dict[str, str]:
+    return _AGENT_THEMES.get(agent, _AGENT_THEMES["default"])
+
+
+def _render_agent_block(content: str, agent: str, *, markdown: bool) -> str:
+    theme = _agent_theme(agent)
+    if markdown:
+        inner = Markdown(content)._repr_html_()
+    else:
+        inner = (
+            f"<pre style='margin:0;white-space:pre-wrap;font-size:0.95em;'>"
+            f"{html.escape(content)}</pre>"
+        )
+    unique_class = f"cleon-bubble-{agent}"
+    block = f"""
+<div class="cleon-result {unique_class}" style="padding:12px;border-radius:8px;border:1px solid {theme['light_border']};background:{theme['light_bg']};color:{theme['light_color']};">
+{inner}
+</div>
+<style>
+@media (prefers-color-scheme: dark) {{
+    .{unique_class} {{
+        background: {theme['dark_bg']};
+        border-color: {theme['dark_border']};
+        color: {theme['dark_color']};
+    }}
+}}
+</style>
+"""
+    return block
 
 
 def _print_events(events: Any) -> None:
@@ -1083,15 +1163,16 @@ class _Progress:
         if self.handle is not None:
             self.handle.update(rendered)
 
-    def finish(self, message: str, markdown: bool = False) -> None:
+    def finish(self, message: str, markdown: bool = False, *, raw_html: bool = False) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
-        rendered = (
-            Markdown(message)
-            if markdown
-            else HTML(self._render_content(message, spinner=False))
-        )
+        if raw_html:
+            rendered = HTML(message)
+        elif markdown:
+            rendered = Markdown(message)
+        else:
+            rendered = HTML(self._render_content(message, spinner=False))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
         elif self.handle is not None:
@@ -1162,97 +1243,6 @@ def _chain(
     return _inner
 
 
-def _ensure_cleon_runtime(
-    *,
-    binary: str | None,
-    extra_env: Mapping[str, str] | None,
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Resolve the codex CLI path and mutate process env accordingly."""
-
-    runtime_env: dict[str, str] = {}
-    if extra_env:
-        for key, value in extra_env.items():
-            os.environ[str(key)] = str(value)
-            runtime_env[str(key)] = str(value)
-
-    resolved = _resolve_cleon_binary(binary)
-    if resolved is None:
-        raise RuntimeError(
-            "Could not find the 'cleon' CLI.\n"
-            "Make sure it is on PATH, set $CLEON_BIN, or call cleon.use(..., binary='/path/to/cleon')."
-        )
-    os.environ["CLEON_BIN"] = resolved
-    runtime_env["CLEON_BIN"] = resolved
-    return {"binary": resolved, "env": runtime_env, "session_id": session_id}
-
-
-def _resolve_cleon_binary(explicit: str | None) -> str | None:
-    """Return a usable cleon binary path if available."""
-
-    candidates: list[str] = []
-    if explicit:
-        candidates.append(explicit)
-
-    env_value = os.environ.get("CLEON_BIN")
-    if env_value:
-        candidates.append(env_value)
-
-    # Bundled binary inside the wheel (src/cleon/bin)
-    try:
-        pkg_bin = importlib_resources.files(__package__).joinpath("bin")
-        for name in ("cleon.exe", "cleon"):
-            cand = pkg_bin / name
-            if cand.is_file():
-                candidates.append(str(cand))
-    except Exception:
-        pass
-
-    which_value = shutil.which("cleon")
-    if which_value:
-        candidates.append(which_value)
-
-    # Heuristic: search upwards for a workspace target/{release,debug}/cleon
-    for parent in Path(__file__).resolve().parents:
-        target_dir = parent / "target"
-        if not target_dir.exists():
-            continue
-        for profile in ("release", "debug"):
-            candidate_path = target_dir / profile / "cleon"
-            if candidate_path.is_file():
-                candidates.append(str(candidate_path))
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        norm = os.path.expanduser(candidate)
-        if norm in seen:
-            continue
-        seen.add(norm)
-        path = Path(norm)
-        if path.is_file():
-            return str(path)
-
-    return None
-
-
-def _shared_session(runtime: Mapping[str, Any]) -> SharedSession:
-    global _SESSION
-    if not _SESSION_ALLOWED:
-        raise RuntimeError(
-            "cleon session not active. To resume call cleon.resume() or cleon.use(..., session_id=...) or start a new session."
-        )
-    if _SESSION is None:
-        _SESSION = SharedSession(
-            binary=str(runtime["binary"]),
-            env=runtime.get("env") or {},
-            session_id=runtime.get("session_id"),
-        )
-    if _SESSION.proc is None and _SESSION.stopped:
-        msg = "cleon session stopped. Start a new session with cleon.use(..., session_id=...) to resume or cleon.use(...) to start fresh."
-        raise RuntimeError(msg)
-    return _SESSION
-
-
 def _configure_logging(path: str | os.PathLike[str] | None) -> None:
     global _LOG_PATH
     if path is None:
@@ -1306,7 +1296,16 @@ def _log_template(template: str) -> None:
         pass
 
 
-def _load_template() -> str | None:
+def _resolve_template(agent: str) -> str | None:
+    """Resolve template for agent via settings or local file fallback."""
+
+    template = template_for_agent(agent)
+    if template:
+        return template
+    return _load_template_file()
+
+
+def _load_template_file() -> str | None:
     """Load template.md from current working directory if it exists."""
     try:
         template_path = Path.cwd() / "template.md"
@@ -1389,7 +1388,7 @@ def _log_context_debug(payload: dict[str, Any]) -> None:
 
 
 def _maybe_prompt_followup(
-    runtime: Mapping[str, Any], mode: DisplayMode, progress: "_Progress"
+    backend: AgentBackend, mode: DisplayMode, progress: "_Progress"
 ) -> None:
     # Heuristic: if last result text looks like a question or request, offer a reply
     text = progress.last_result_text.strip()
@@ -1401,20 +1400,21 @@ def _maybe_prompt_followup(
     reply = reply.strip()
 
     def _cancel() -> None:
-        _stop_session()
+        _stop_session(force=True, wait_for_tasks=False)
 
     resp_progress = _Progress(
         render=True if mode != "none" else False,
         _cancel=_cancel,
     )
+    agent = getattr(backend, "name", "codex")
     try:
-        result, events = _shared_session(runtime).send(
+        result, events = backend.send(
             reply, on_event=_chain(resp_progress.update, _log_event)
         )
     except Exception as exc:
         print(f"Failed to send reply: {exc}")
         return
-    _display_result(result, mode, resp_progress)
+    _display_result(result, mode, resp_progress, agent)
     _print_events(events)
     return
 
@@ -1556,34 +1556,47 @@ def _prompt_approval(event: dict[str, Any]) -> str | None:
     return selection
 
 
-def _stop_session() -> str | None:
-    global _SESSION, _SESSION_ALLOWED
-    if _SESSION is None:
+def _stop_session(
+    *,
+    agent: str | None = None,
+    keep_backend: bool = False,
+    force: bool = False,
+    wait_for_tasks: bool = True,
+) -> str | None:
+    global _ACTIVE_BACKEND
+    backend = _ACTIVE_BACKEND
+    if backend is None:
         return None
-    _SESSION.stop()
-    session_id = _SESSION.session_id
-    resume_cmd = _SESSION.resume_command
+    if agent and getattr(backend, "name", None) != agent:
+        return None
+    if force:
+        _cancel_all()
+    elif wait_for_tasks:
+        _wait_for_async_tasks()
+    info = backend.stop()
+    session_id = info.session_id
+    resume_cmd = info.resume_command
     if session_id:
         if not resume_cmd:
             resume_cmd = f"cleon --resume {session_id}"
-        _persist_session_id(session_id, resume_cmd)
+        _persist_session_id(session_id, resume_cmd, backend.name)
         print(
             "Session stopped.\n"
             "You can resume with:\n"
-            f'  cleon.use("codex", session_id="{session_id}")\n'
+            f'  cleon.use("{backend.name}", session_id="{session_id}")\n'
             "or\n"
             "  cleon.resume()"
         )
-    _SESSION = None
-    _SESSION_ALLOWED = False
+    if not keep_backend:
+        _ACTIVE_BACKEND = None
     return session_id
 
 
 def _session_alive() -> bool:
-    if _SESSION is None:
+    backend = _ACTIVE_BACKEND
+    if backend is None:
         return False
-    proc = _SESSION.proc
-    return proc is not None and proc.poll() is None
+    return backend.session_alive()
 
 
 class ContextTracker:

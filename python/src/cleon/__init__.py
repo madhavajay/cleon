@@ -12,8 +12,15 @@ from .magic import (
     help as help_text,
     stop as stop_session,
     resume as resume_session,
+    status as status_info,
+    mode as mode_control,
+    add_mode as add_mode_entry,
+    default_mode as default_mode_entry,
+    reset as reset_runtime,
+    sessions as list_sessions,
 )
 from . import autoroute
+from .settings import settings as settings_store
 
 __all__ = [
     "auth",
@@ -23,6 +30,13 @@ __all__ = [
     "use",
     "stop",
     "resume",
+    "status",
+    "mode",
+    "add_mode",
+    "default_mode",
+    "sessions",
+    "reset",
+    "settings",
     "autoroute",
     "load_ipython_extension",
     "history_magic",
@@ -35,9 +49,58 @@ def help() -> None:  # type: ignore[override]
     return help_text()
 
 
-def stop() -> str | None:
-    return stop_session()
+def stop(agent: str | None = None, *, force: bool = False) -> str | None:
+    return stop_session(agent=agent, force=force)
 
 
 def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
     return resume_session(agent=agent, session_id=session_id)
+
+
+def status() -> dict[str, object]:
+    return status_info()
+
+
+def mode(name: str | None = None, *, agent: str | None = None) -> str:
+    return mode_control(name=name, agent=agent)
+
+
+def add_mode(name: str, template: str | None = None, *, agent: str | None = None):
+    return add_mode_entry(name=name, template=template, agent=agent)
+
+
+def default_mode(name: str, *, agent: str | None = None):
+    return default_mode_entry(name=name, agent=agent)
+
+
+def settings(**updates):
+    return settings_store(**updates)
+
+
+def reset():
+    return reset_runtime()
+
+
+def sessions():
+    return list_sessions()
+
+
+_AUTO_INITIALIZED = False
+
+
+def _auto_register_magic() -> None:
+    global _AUTO_INITIALIZED
+    if _AUTO_INITIALIZED:
+        return
+    try:
+        from IPython import get_ipython  # type: ignore
+
+        ip = get_ipython()
+        if ip is not None:
+            use(ipython=ip)
+            _AUTO_INITIALIZED = True
+    except Exception:
+        pass
+
+
+_auto_register_magic()
