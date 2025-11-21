@@ -10,17 +10,58 @@ from typing import Any, Mapping
 DEFAULT_SETTINGS: dict[str, Any] = {
     "default_agent": "codex",
     "default_mode": "learn",
+    "plain_text_output": False,
     "agents": {
-        "codex": {"prefix": ">", "default_mode": "learn", "binary": None},
-        "claude": {"prefix": "~", "default_mode": "learn", "binary": None},
+        "codex": {
+            "prefix": ">",
+            "default_mode": "learn",
+            "binary": None,
+            "theme": {
+                "light_bg": "#1F1F1F",
+                "light_border": "#3A3A3A",
+                "light_color": "#F5F5F5",
+                "dark_bg": "#1F1F1F",
+                "dark_border": "#3A3A3A",
+                "dark_color": "#F5F5F5",
+            },
+        },
+        "claude": {
+            "prefix": "~",
+            "default_mode": "learn",
+            "binary": None,
+            "connection_url": None,
+            "server_dir": None,
+            "anthropic_api_key": None,
+            "server_command": None,
+            "query_config": {},
+            "system_prompt": (
+                "You are Claude, Anthropic's coding-focused assistant, answering from inside a Jupyter notebook via Cleon. "
+                "Never refer to yourself as Pi or pi-coding-agent. Keep replies concise, focus on the requested code/task, "
+                "and mention when you ran shell commands or edited files."
+            ),
+            "allowed_tools": None,
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "args": [],
+            "no_session": True,
+            "response_timeout": 240,
+            "theme": {
+                "light_bg": "#262624",
+                "light_border": "#4A4A45",
+                "light_color": "#F7F5F2",
+                "dark_bg": "#262624",
+                "dark_border": "#4A4A45",
+                "dark_color": "#F7F5F2",
+            },
+        },
     },
     "modes": {
         "learn": {
             "template": None,
             "agent": None,
         },
-        "oracle": {
-            "template": "Answer succinctly with direct solutions. Avoid speculative language unless clarification is required.",
+        "do": {
+            "template": None,
             "agent": None,
         },
     },
@@ -107,8 +148,23 @@ def reset_settings() -> dict[str, Any]:
     return _SETTINGS_MANAGER.reset()
 
 
-def settings(**updates: Any) -> dict[str, Any]:
-    """Read or update cleon settings."""
+_UNSET: Any = object()
+
+
+def settings(key: Any = _UNSET, value: Any = _UNSET, **updates: Any) -> dict[str, Any]:
+    """Read or update cleon settings.
+
+    Usage:
+    - settings() -> returns all settings
+    - settings(foo=True, bar=2) -> updates multiple keys
+    - settings("foo", True) -> updates a single key
+    """
+
+    if key is not _UNSET and value is _UNSET:
+        raise ValueError("When passing a key positionally, provide a value as well.")
+
+    if key is not _UNSET:
+        updates[str(key)] = value
 
     if not updates:
         return load_settings()
@@ -144,7 +200,9 @@ def get_default_mode(agent: str | None = None) -> str:
     return data.get("default_mode", "learn")
 
 
-def add_mode(name: str, template: str | None, *, agent: str | None = None) -> dict[str, Any]:
+def add_mode(
+    name: str, template: str | None, *, agent: str | None = None
+) -> dict[str, Any]:
     normalized = name.strip().lower()
     return update_settings(
         {
@@ -163,10 +221,18 @@ def default_mode(name: str, *, agent: str | None = None) -> dict[str, Any]:
     modes = settings_data.get("modes", {})
     normalized = name.strip().lower()
     if normalized not in modes:
-        raise ValueError(f"Unknown mode '{name}'. Add it with cleon.add_mode(...) first.")
+        raise ValueError(
+            f"Unknown mode '{name}'. Add it with cleon.add_mode(...) first."
+        )
     if agent:
         return update_settings({"agents": {agent: {"default_mode": normalized}}})
     return update_settings({"default_mode": normalized})
+
+
+def plain_text_output() -> bool:
+    """Return whether results should render as simple plain text instead of styled HTML."""
+    data = load_settings()
+    return bool(data.get("plain_text_output", False))
 
 
 def get_mode_template(mode: str) -> str | None:
@@ -176,7 +242,7 @@ def get_mode_template(mode: str) -> str | None:
     if isinstance(entry, dict):
         template = entry.get("template")
         if isinstance(template, str) or template is None:
-            return template
+            return template or _load_mode_file(mode)
     return None
 
 
@@ -184,6 +250,17 @@ def template_for_agent(agent: str) -> str | None:
     mode_name = get_default_mode(agent)
     template = get_mode_template(mode_name)
     return template
+
+
+def _load_mode_file(mode: str) -> str | None:
+    """Load a mode template from prompts/<mode>.md if present."""
+    try:
+        path = Path.cwd() / "prompts" / f"{mode}.md"
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
 
 
 def status_summary() -> dict[str, Any]:
@@ -194,3 +271,13 @@ def status_summary() -> dict[str, Any]:
         "modes": data.get("modes", {}),
         "default_mode": data.get("default_mode", "learn"),
     }
+
+
+def get_agent_theme(agent: str) -> dict[str, str]:
+    data = load_settings()
+    agents = data.get("agents", {})
+    entry = agents.get(agent, {})
+    theme = entry.get("theme")
+    if isinstance(theme, dict):
+        return {str(k): str(v) for k, v in theme.items()}
+    return {}
