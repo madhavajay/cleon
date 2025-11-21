@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from secrets import token_bytes
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
@@ -74,7 +74,9 @@ def login_claude() -> None:
     auth_url = _build_auth_url(challenge, verifier)
     print("Open the following URL in your browser and authorize cleon:\n")
     print(auth_url)
-    print("\nAfter authorizing, copy the complete \"code#state\" value and paste it below.")
+    print(
+        '\nAfter authorizing, copy the complete "code#state" value and paste it below.'
+    )
     code_input = input("Authorization response (code#state): ").strip()
     if not code_input:
         print("Login cancelled.")
@@ -117,11 +119,15 @@ def login_claude() -> None:
         except Exception:
             pass
         message = f"OAuth token exchange failed ({exc.code} {exc.reason})."
+        if exc.code == 403:
+            message += " This usually means the code was already used or expired—try restarting login and paste the new code#state."
         if detail:
             message += f" Response: {detail}"
         print(message)
-        print("Try running cleon.login('claude') again to start a fresh login and paste the new code.")
         print("If this keeps failing, set ANTHROPIC_API_KEY directly to skip OAuth.")
+        return
+    except URLError as exc:
+        print(f"OAuth token exchange failed: {exc.reason}")
         return
     expires_ms = int(data.get("expires_in", 0)) * 1000
     now_ms = int(time.time() * 1000)

@@ -19,8 +19,9 @@ from .magic import (
     reset as reset_runtime,
     sessions as list_sessions,
 )
+from .backend import SharedSession
 from . import autoroute
-from .settings import settings as settings_store
+from .settings import settings as settings_store, _UNSET as _SETTINGS_UNSET
 from .oauth import login_claude
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "load_ipython_extension",
     "history_magic",
     "help",
+    "SharedSession",
 ]
 
 
@@ -75,8 +77,8 @@ def default_mode(name: str, *, agent: str | None = None):
     return default_mode_entry(name=name, agent=agent)
 
 
-def settings(**updates):
-    return settings_store(**updates)
+def settings(key=_SETTINGS_UNSET, value=_SETTINGS_UNSET, **updates):
+    return settings_store(key=key, value=value, **updates)
 
 
 def reset():

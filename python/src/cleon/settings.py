@@ -10,6 +10,7 @@ from typing import Any, Mapping
 DEFAULT_SETTINGS: dict[str, Any] = {
     "default_agent": "codex",
     "default_mode": "learn",
+    "plain_text_output": False,
     "agents": {
         "codex": {
             "prefix": ">",
@@ -59,8 +60,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "template": None,
             "agent": None,
         },
-        "oracle": {
-            "template": "Answer succinctly with direct solutions. Avoid speculative language unless clarification is required.",
+        "do": {
+            "template": None,
             "agent": None,
         },
     },
@@ -147,8 +148,23 @@ def reset_settings() -> dict[str, Any]:
     return _SETTINGS_MANAGER.reset()
 
 
-def settings(**updates: Any) -> dict[str, Any]:
-    """Read or update cleon settings."""
+_UNSET: Any = object()
+
+
+def settings(key: Any = _UNSET, value: Any = _UNSET, **updates: Any) -> dict[str, Any]:
+    """Read or update cleon settings.
+
+    Usage:
+    - settings() -> returns all settings
+    - settings(foo=True, bar=2) -> updates multiple keys
+    - settings("foo", True) -> updates a single key
+    """
+
+    if key is not _UNSET and value is _UNSET:
+        raise ValueError("When passing a key positionally, provide a value as well.")
+
+    if key is not _UNSET:
+        updates[str(key)] = value
 
     if not updates:
         return load_settings()
@@ -184,7 +200,9 @@ def get_default_mode(agent: str | None = None) -> str:
     return data.get("default_mode", "learn")
 
 
-def add_mode(name: str, template: str | None, *, agent: str | None = None) -> dict[str, Any]:
+def add_mode(
+    name: str, template: str | None, *, agent: str | None = None
+) -> dict[str, Any]:
     normalized = name.strip().lower()
     return update_settings(
         {
@@ -203,10 +221,18 @@ def default_mode(name: str, *, agent: str | None = None) -> dict[str, Any]:
     modes = settings_data.get("modes", {})
     normalized = name.strip().lower()
     if normalized not in modes:
-        raise ValueError(f"Unknown mode '{name}'. Add it with cleon.add_mode(...) first.")
+        raise ValueError(
+            f"Unknown mode '{name}'. Add it with cleon.add_mode(...) first."
+        )
     if agent:
         return update_settings({"agents": {agent: {"default_mode": normalized}}})
     return update_settings({"default_mode": normalized})
+
+
+def plain_text_output() -> bool:
+    """Return whether results should render as simple plain text instead of styled HTML."""
+    data = load_settings()
+    return bool(data.get("plain_text_output", False))
 
 
 def get_mode_template(mode: str) -> str | None:
@@ -216,7 +242,7 @@ def get_mode_template(mode: str) -> str | None:
     if isinstance(entry, dict):
         template = entry.get("template")
         if isinstance(template, str) or template is None:
-            return template
+            return template or _load_mode_file(mode)
     return None
 
 
@@ -224,6 +250,17 @@ def template_for_agent(agent: str) -> str | None:
     mode_name = get_default_mode(agent)
     template = get_mode_template(mode_name)
     return template
+
+
+def _load_mode_file(mode: str) -> str | None:
+    """Load a mode template from prompts/<mode>.md if present."""
+    try:
+        path = Path.cwd() / "prompts" / f"{mode}.md"
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
 
 
 def status_summary() -> dict[str, Any]:

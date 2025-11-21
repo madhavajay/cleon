@@ -6,7 +6,6 @@ import base64
 import html
 import importlib.resources as importlib_resources
 import json
-import itertools
 import os
 import queue
 import threading
@@ -52,6 +51,7 @@ from .settings import (
     add_mode as settings_add_mode,
     default_mode as settings_default_mode,
     reset_settings as settings_reset,
+    plain_text_output,
 )
 
 DisplayMode = str
@@ -79,6 +79,8 @@ _ACTIVE_ASYNC_COUNT = 0
 _ACTIVE_ASYNC_LOCK = threading.Lock()
 _ASYNC_IDLE = threading.Event()
 _ASYNC_IDLE.set()
+_AGENT_HISTORY_LOCK = threading.Lock()
+_CONTEXT_LOCK = threading.Lock()
 
 _AGENT_THEMES = {
     "codex": {
@@ -212,7 +214,9 @@ def _require_backend(name: str | None = None) -> AgentBackend:
         try:
             display(HTML(msg))
         except Exception:
-            print("cleon session not active. Run cleon.use(...) or cleon.resume(...) first.")
+            print(
+                "cleon session not active. Run cleon.use(...) or cleon.resume(...) first."
+            )
         raise RuntimeError("cleon session not active.")
     return _ACTIVE_BACKEND
 
@@ -434,7 +438,17 @@ def _load_session_store() -> dict[str, dict[str, str]]:
     try:
         path = _session_store_path()
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                # Ensure JSON types are strings for mypy; coerce non-strings
+                sanitized: dict[str, dict[str, str]] = {}
+                for key, value in raw.items():
+                    if isinstance(value, dict):
+                        inner: dict[str, str] = {}
+                        for k, v in value.items():
+                            inner[str(k)] = str(v)
+                        sanitized[str(key)] = inner
+                return sanitized
     except Exception:
         pass
     return {}
@@ -449,14 +463,14 @@ def _persist_session_id(session_id: str, resume_cmd: str | None, agent: str) -> 
             "resume_command": resume_cmd or "",
             "agent": agent,
             "notebook": key,
-            "timestamp": time.time(),
+            "timestamp": f"{time.time()}",
         }
         store["_last"] = {
             "session_id": session_id,
             "resume_command": resume_cmd or "",
             "agent": agent,
             "notebook": key,
-            "timestamp": time.time(),
+            "timestamp": f"{time.time()}",
         }
         path = _session_store_path()
         path.write_text(
@@ -535,7 +549,7 @@ def _process_codex_request(request: CodexRequest) -> None:
         # 2. Context (if enabled)
         if _CONTEXT_TRACKER is not None:
             context_block = _build_context_block(
-                request.context_cells, request.context_chars
+                request.context_cells, request.context_chars, agent_name
             )
             if context_block:
                 _log_context_block(context_block)
@@ -635,7 +649,9 @@ def register_magic(
     # Configure async mode
     global _ASYNC_MODE
     if async_mode and not getattr(backend, "supports_async", True):
-        print(f"Backend '{backend_name}' does not support async mode; falling back to synchronous turns.")
+        print(
+            f"Backend '{backend_name}' does not support async mode; falling back to synchronous turns."
+        )
         async_mode = False
     _ASYNC_MODE = async_mode
     if async_mode:
@@ -666,7 +682,12 @@ def register_magic(
             cmd = cmd.lower()
 
             def _cancel() -> None:
-                _stop_session(agent=normalized, backend=active_backend, force=True, wait_for_tasks=False)
+                _stop_session(
+                    agent=normalized,
+                    backend=active_backend,
+                    force=True,
+                    wait_for_tasks=False,
+                )
 
             progress = _Progress(render=stream, _cancel=_cancel)
 
@@ -724,7 +745,9 @@ def register_magic(
                         "Context tracking not enabled. Use cleon.use(..., context_changes=True)"
                     )
                     return None
-                block = _build_context_block(context_cells, context_chars, peek=True)
+                block = _build_context_block(
+                    context_cells, context_chars, active_agent_name, peek=True
+                )
                 if block:
                     print("Preview of context for next %%codex turn:\n")
                     print(block)
@@ -773,7 +796,12 @@ def register_magic(
 
         # Synchronous mode: execute immediately
         def _cancel_sync() -> None:
-            _stop_session(agent=normalized, backend=session_backend, force=True, wait_for_tasks=False)
+            _stop_session(
+                agent=normalized,
+                backend=session_backend,
+                force=True,
+                wait_for_tasks=False,
+            )
 
         progress = _Progress(render=stream, _cancel=_cancel_sync)
 
@@ -791,7 +819,9 @@ def register_magic(
 
         # 2. Context (if enabled)
         if context_changes:
-            context_block = _build_context_block(context_cells, context_chars)
+            context_block = _build_context_block(
+                context_cells, context_chars, agent_name
+            )
             if context_block:
                 _log_context_block(context_block)
                 parts.append(f"Context (changed cells):\n{context_block}")
@@ -889,7 +919,9 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
     if backend is None:
         print(f"No backend named '{agent_name}' is active.")
         return None
-    session_id = _stop_session(agent=agent_name, backend=backend, force=force, wait_for_tasks=wait_for_tasks)
+    session_id = _stop_session(
+        agent=agent_name, backend=backend, force=force, wait_for_tasks=wait_for_tasks
+    )
     if _ASYNC_MODE:
         if wait_for_tasks:
             _wait_for_async_tasks()
@@ -906,15 +938,24 @@ def status() -> dict[str, Any]:
             "alive": backend.session_alive(),
         }
     runtime = {
-        "active_agent": getattr(_ACTIVE_BACKEND, "name", None) if _ACTIVE_BACKEND else None,
+        "active_agent": getattr(_ACTIVE_BACKEND, "name", None)
+        if _ACTIVE_BACKEND
+        else None,
         "async_mode": _ASYNC_MODE,
         "queued_requests": queued,
         "active_requests": _active_async_requests(),
         "backends": backends_status,
     }
-    result = {"runtime": runtime, "settings": status_summary(), "sessions": _load_session_store()}
+    result = {
+        "runtime": runtime,
+        "settings": status_summary(),
+        "sessions": _load_session_store(),
+    }
     current_agent = runtime["active_agent"]
-    alive = _session_alive(current_agent) if current_agent else False
+    current_agent_name: str | None = (
+        current_agent if isinstance(current_agent, str) else None
+    )
+    alive = _session_alive(current_agent_name) if current_agent_name else False
     print(
         "cleon status - "
         f"agent: {current_agent or 'none'}, "
@@ -990,10 +1031,13 @@ def mode(name: str | None = None, *, agent: str | None = None) -> str:
     if name is None:
         return get_default_mode(target_agent)
     settings_default_mode(name, agent=target_agent)
+    _reset_first_turn(agent=target_agent)
     return name
 
 
-def add_mode(name: str, template: str | None = None, *, agent: str | None = None) -> dict[str, Any]:
+def add_mode(
+    name: str, template: str | None = None, *, agent: str | None = None
+) -> dict[str, Any]:
     """Register a custom mode with an optional template."""
 
     normalized = name.strip().lower()
@@ -1004,7 +1048,23 @@ def default_mode(name: str, *, agent: str | None = None) -> dict[str, Any]:
     """Explicitly set the default mode for an agent."""
 
     normalized = name.strip().lower()
-    return settings_default_mode(normalized, agent=_default_agent_name(agent))
+    result = settings_default_mode(normalized, agent=_default_agent_name(agent))
+    _reset_first_turn(agent=_default_agent_name(agent))
+    return result
+
+
+def _reset_first_turn(agent: str | None) -> None:
+    """Mark active backends so the next turn re-sends the mode template."""
+    target = _default_agent_name(agent)
+    backend = _BACKENDS.get(target)
+    if backend is None:
+        return
+    setter = getattr(backend, "reset_first_turn", None)
+    if callable(setter):
+        try:
+            setter()
+        except Exception:
+            pass
 
 
 def sessions() -> dict[str, dict[str, str]]:
@@ -1049,9 +1109,7 @@ def sessions() -> dict[str, dict[str, str]]:
                 </thead>
                 <tbody>{rows}</tbody>
             </table>
-            """.format(
-                rows="".join(rows)
-            )
+            """.format(rows="".join(rows))
             return table
 
     view = _SessionView(store)
@@ -1061,24 +1119,26 @@ def sessions() -> dict[str, dict[str, str]]:
 def _record_agent_history(agent: str, prompt: str, response: str) -> None:
     if not response.strip():
         return
-    history_map = _ensure_history_map()
     entry = {
         "agent": agent,
         "prompt": prompt.strip(),
         "response": response.strip(),
         "timestamp": time.time(),
     }
-    history = history_map.setdefault(agent, deque(maxlen=_HISTORY_LIMIT))
-    history.append(entry)
+    with _AGENT_HISTORY_LOCK:
+        history_map = _ensure_history_map()
+        history = history_map.setdefault(agent, deque(maxlen=_HISTORY_LIMIT))
+        history.append(entry)
 
 
 def _build_interagent_context(agent: str, limit: int = 4) -> str:
-    history_map = _ensure_history_map()
-    entries: list[dict[str, Any]] = []
-    for other_agent, history in history_map.items():
-        if other_agent == agent:
-            continue
-        entries.extend(list(history)[-limit:])
+    with _AGENT_HISTORY_LOCK:
+        history_map = _ensure_history_map()
+        entries: list[dict[str, Any]] = []
+        for other_agent, history in history_map.items():
+            if other_agent == agent:
+                continue
+            entries.extend(list(history)[-limit:])
     entries = [entry for entry in entries if isinstance(entry, dict)]
     if not entries:
         return ""
@@ -1195,7 +1255,7 @@ def _display_result(
     result: Any, mode: DisplayMode, progress: "_Progress", agent: str
 ) -> None:
     text = _extract_final_message(result)
-    use_markdown = mode == "markdown" or (mode == "auto" and text)
+    use_markdown: bool = bool(mode == "markdown" or (mode == "auto" and text))
     message = text or "(no final message)"
     themed_html = _render_agent_block(message, agent, markdown=use_markdown)
     progress.finish(themed_html, raw_html=True)
@@ -1250,11 +1310,20 @@ def _agent_theme(agent: str) -> dict[str, str]:
 
 
 def _render_agent_block(content: str, agent: str | None, *, markdown: bool) -> str:
+    if plain_text_output():
+        return (
+            "<pre style='margin:0;white-space:pre-wrap;font-size:0.95em;"
+            "background:transparent;color:inherit;font-family:SFMono-Regular,Consolas,"
+            '"Liberation Mono",Menlo,monospace;\'>'
+            f"{html.escape(content)}</pre>"
+        )
     agent_name = agent or "codex"
     theme = _agent_theme(agent_name)
     inner = None
     if markdown:
         inner = _render_markdown_html(content)
+        if inner is None:
+            inner = _render_markdown_fallback(content)
     if not inner:
         inner = (
             f"<pre style='margin:0;white-space:pre-wrap;font-size:0.95em;background:transparent;color:inherit;'>"
@@ -1270,16 +1339,16 @@ def _render_agent_block(content: str, agent: str | None, *, markdown: bool) -> s
         icon_html = icon_ref
     unique_class = f"cleon-bubble-{agent}"
     block = f"""
-<div class="cleon-result {unique_class}" style="position:relative;margin-left:10px;padding:12px 32px 12px 16px;border-radius:12px;border:1px solid {theme['light_border']};background:{theme['light_bg']};color:{theme['light_color']};box-shadow:0 8px 18px rgba(0,0,0,0.18);">
+<div class="cleon-result {unique_class}" style="position:relative;margin-left:10px;padding:12px 32px 12px 16px;border-radius:12px;border:1px solid {theme["light_border"]};background:{theme["light_bg"]};color:{theme["light_color"]};box-shadow:0 8px 18px rgba(0,0,0,0.18);">
 {icon_html}
 {inner}
 </div>
 <style>
 @media (prefers-color-scheme: dark) {{
     .{unique_class} {{
-        background: {theme['dark_bg']};
-        border-color: {theme['dark_border']};
-        color: {theme['dark_color']};
+        background: {theme["dark_bg"]};
+        border-color: {theme["dark_border"]};
+        color: {theme["dark_color"]};
     }}
 }}
 </style>
@@ -1302,6 +1371,60 @@ def _render_markdown_html(content: str) -> str | None:
     return None
 
 
+def _render_markdown_fallback(content: str) -> str:
+    """Minimal Markdown-ish renderer for code fences and paragraphs."""
+    lines = content.splitlines()
+    parts: list[str] = []
+    in_code = False
+    code_lang = ""
+    code_buf: list[str] = []
+
+    def _flush_code() -> None:
+        nonlocal code_buf
+        if not code_buf:
+            return
+        code_text = "\n".join(code_buf)
+        escaped = html.escape(code_text)
+        lang_class = f"language-{html.escape(code_lang)}" if code_lang else ""
+        parts.append(
+            "<pre style='margin:8px 0 10px 0; padding:10px 12px; "
+            "white-space:pre-wrap; background:rgba(0,0,0,0.08); "
+            "border:1px solid rgba(255,255,255,0.08); border-radius:8px;"
+            'font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;'
+            "font-size:0.95em;'>"
+            f"<code class='{lang_class}'>{escaped}</code>"
+            "</pre>"
+        )
+        code_buf = []
+
+    for line in lines:
+        if line.startswith("```"):
+            fence_lang = line[3:].strip()
+            if in_code:
+                _flush_code()
+                in_code = False
+                code_lang = ""
+            else:
+                in_code = True
+                code_lang = fence_lang
+            continue
+        if in_code:
+            code_buf.append(line)
+        else:
+            if line.strip():
+                parts.append(
+                    "<p style='margin:0 0 6px 0; line-height:1.45;'>"
+                    f"{html.escape(line)}</p>"
+                )
+            else:
+                parts.append("<div style='height:6px'></div>")
+
+    if in_code:
+        _flush_code()
+
+    return "".join(parts) or html.escape(content)
+
+
 def _agent_icon(agent: str) -> str | None:
     rel = _AGENT_ICON_PATHS.get(agent)
     if not rel:
@@ -1317,8 +1440,6 @@ def _agent_icon(agent: str) -> str | None:
     except Exception:
         pass
     return f"<span class='cleon-icon cleon-icon-{agent}'></span>"
-
-
 
 
 def _print_events(events: Any) -> None:
@@ -1359,7 +1480,7 @@ class _Progress:
                 self.last_message = "Working..."
             self.update_message(self.last_message, markdown=False)
 
-    def _render_content(self, message: str, spinner: bool = False) -> str:
+    def _render_content(self, message: str) -> str:
         if self.agent:
             return _render_agent_block(message, self.agent, markdown=False)
         style = "color: #666; font-family: monospace;"
@@ -1368,7 +1489,7 @@ class _Progress:
     def update(self, event: Any) -> None:
         msg = _summarize_event(event) or self.last_message
         self.last_message = msg
-        rendered = HTML(self._render_content(msg, spinner=True))
+        rendered = HTML(self._render_content(msg))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
             return
@@ -1380,14 +1501,16 @@ class _Progress:
         if markdown and not self.agent:
             rendered = Markdown(message)
         else:
-            rendered = HTML(self._render_content(message, spinner=False))
+            rendered = HTML(self._render_content(message))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
             return
         if self.handle is not None:
             self.handle.update(rendered)
 
-    def finish(self, message: str, markdown: bool = False, *, raw_html: bool = False) -> None:
+    def finish(
+        self, message: str, markdown: bool = False, *, raw_html: bool = False
+    ) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
@@ -1396,7 +1519,7 @@ class _Progress:
         elif markdown:
             rendered = Markdown(message)
         else:
-            rendered = HTML(self._render_content(message, spinner=False))
+            rendered = HTML(self._render_content(message))
         if self.handle_id is not None:
             update_display(rendered, display_id=self.handle_id)
         elif self.handle is not None:
@@ -1535,11 +1658,15 @@ def _resolve_template(agent: str) -> str | None:
 
 
 def _load_template_file() -> str | None:
-    """Load template.md from current working directory if it exists."""
+    """Load template.md or prompts/learn.md from current working directory if it exists."""
     try:
-        template_path = Path.cwd() / "template.md"
-        if template_path.exists() and template_path.is_file():
-            return template_path.read_text(encoding="utf-8")
+        candidates = [
+            Path.cwd() / "prompts" / "learn.md",
+            Path.cwd() / "template.md",
+        ]
+        for template_path in candidates:
+            if template_path.exists() and template_path.is_file():
+                return template_path.read_text(encoding="utf-8")
     except Exception:
         pass
     return None
@@ -1810,7 +1937,11 @@ def _stop_session(
     info = target_backend.stop()
     session_id = info.session_id
     resume_cmd = info.resume_command
-    if session_id and backend_name in {"codex", None} and getattr(target_backend, "name", "") == "codex":
+    if (
+        session_id
+        and backend_name in {"codex", None}
+        and getattr(target_backend, "name", "") == "codex"
+    ):
         if not resume_cmd:
             resume_cmd = f"cleon --resume {session_id}"
         _persist_session_id(session_id, resume_cmd, target_backend.name)
@@ -1837,10 +1968,15 @@ def _session_alive(agent: str | None = None) -> bool:
 
 class ContextTracker:
     def __init__(self) -> None:
-        self.last_seen: int = 0
+        self.last_seen_map: dict[str, int] = {}
+        self._baseline = 0
 
     def build_block(
-        self, max_cells: int | None, max_chars: int | None, peek: bool = False
+        self,
+        max_cells: int | None,
+        max_chars: int | None,
+        agent: str | None,
+        peek: bool = False,
     ) -> str:
         ip = get_ipython()
         if ip is None:
@@ -1849,6 +1985,8 @@ class ContextTracker:
         outputs = ip.user_ns.get("Out", {})
         if not isinstance(history, list):
             return ""
+        agent_key = agent or "_default"
+        baseline = len(history) - 1
 
         # Sliding window mode: if max_cells is set, always get last N cells (not just new ones)
         # This ensures Codex always has context even on consecutive %%codex calls
@@ -1857,7 +1995,8 @@ class ContextTracker:
             start_idx = max(1, len(history) - max_cells)
         else:
             # Incremental mode: only new cells since last_seen
-            start_idx = max(1, self.last_seen + 1)
+            last_seen = self.last_seen_map.get(agent_key, self._baseline)
+            start_idx = max(1, last_seen + 1)
 
         cells = []
         for idx in range(start_idx, len(history)):
@@ -1899,7 +2038,7 @@ class ContextTracker:
 
         debug_info = {
             "start_idx": start_idx,
-            "last_seen": self.last_seen,
+            "last_seen": self.last_seen_map.get(agent_key, self._baseline),
             "history_len": len(history) - 1,
             "cells_considered": [
                 {"idx": idx, "has_output": bool(out), "code_len": len(code)}
@@ -1907,14 +2046,15 @@ class ContextTracker:
             ],
             "peek": peek,
             "sliding_window": max_cells is not None and max_cells > 0,
+            "agent": agent_key,
         }
         _log_context_debug(debug_info)
         if not cells:
             if not peek:
-                self.last_seen = len(history) - 1
+                self.last_seen_map[agent_key] = baseline
             return ""
         if not peek:
-            self.last_seen = len(history) - 1
+            self.last_seen_map[agent_key] = baseline
         parts = []
         for idx, code_block, out_text in cells:
             segment = [f"[cell {idx}]", "code:", code_block]
@@ -1934,15 +2074,17 @@ def _configure_context() -> None:
         if ip is not None:
             history = ip.user_ns.get("In", [])
             if isinstance(history, list):
-                _CONTEXT_TRACKER.last_seen = len(history) - 1
+                _CONTEXT_TRACKER._baseline = len(history) - 1
+                _CONTEXT_TRACKER.last_seen_map["_default"] = _CONTEXT_TRACKER._baseline
 
 
 def _build_context_block(
-    max_cells: int | None, max_chars: int | None, peek: bool = False
+    max_cells: int | None, max_chars: int | None, agent: str | None, peek: bool = False
 ) -> str:
     if _CONTEXT_TRACKER is None:
         return ""
-    return _CONTEXT_TRACKER.build_block(max_cells, max_chars, peek=peek)
+    with _CONTEXT_LOCK:
+        return _CONTEXT_TRACKER.build_block(max_cells, max_chars, agent, peek=peek)
 
 
 def history_magic(line: str, cell: str | None = None) -> str | None:
@@ -1961,7 +2103,7 @@ def history_magic(line: str, cell: str | None = None) -> str | None:
                 max_chars = int(parts[1])
             except Exception:
                 max_chars = None
-    block = _build_context_block(max_cells, max_chars, peek=True)
+    block = _build_context_block(max_cells, max_chars, None, peek=True)
     if block:
         print("Changed cells since last Codex turn:\n")
         print(block)

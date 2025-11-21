@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -20,7 +19,6 @@ import importlib.resources as importlib_resources
 from ._cleon import run as cleon_run  # type: ignore[import-not-found]
 from .settings import (
     get_agent_settings,
-    get_cleon_home,
 )
 
 
@@ -187,6 +185,10 @@ class SharedSession:
                 raise RuntimeError("cleon output missing turn.result payload")
             return final, events
 
+    def mark_first_turn(self) -> None:
+        """Force the next send() to treat the prompt as the first turn."""
+        self.first_turn = True
+
     def _drain_stdout(self, capture_metadata: bool = False) -> None:
         assert self.proc is not None
         stdout = self.proc.stdout
@@ -301,6 +303,10 @@ class CodexBackend:
         session = self._ensure_session()
         return session.first_turn
 
+    def reset_first_turn(self) -> None:
+        session = self._ensure_session()
+        session.mark_first_turn()
+
     def _ensure_session(self) -> SharedSession:
         if self._session is None or self._session.stopped:
             self._session = SharedSession(
@@ -398,7 +404,9 @@ def _resolve_pi_command(config: Any) -> list[str]:
 
 
 class PiProcess:
-    def __init__(self, settings: Mapping[str, Any], extra_env: Mapping[str, str] | None) -> None:
+    def __init__(
+        self, settings: Mapping[str, Any], extra_env: Mapping[str, str] | None
+    ) -> None:
         self._settings = settings
         self._env = os.environ.copy()
         if extra_env:
@@ -625,6 +633,10 @@ class PiBackend:
             self._process.restart()
             self._first_turn = True
 
+    def reset_first_turn(self) -> None:
+        with self._send_lock:
+            self._first_turn = True
+
     def session_alive(self) -> bool:
         return self._process.alive
 
@@ -686,4 +698,6 @@ def _extract_pi_text(message: Any) -> str:
                 parts.append(item["text"])
     elif isinstance(content, str):
         parts.append(content)
-    return "\n".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
+    return "\n".join(
+        part.strip() for part in parts if isinstance(part, str) and part.strip()
+    )
