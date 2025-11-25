@@ -8,6 +8,7 @@ import queue
 import select
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -54,6 +55,27 @@ class SessionStopInfo:
 
 
 _SESSION_LOCK = threading.Lock()
+
+
+def _log_backend_event(agent: str, event: str, details: Mapping[str, Any]) -> None:
+    """Lightweight logger for backend timing/debug events."""
+
+    path = os.environ.get("CLEON_LOG_PATH", "./cleon.log")
+    try:
+        payload = {
+            "ts": time.time(),
+            "agent": agent,
+            "event": event,
+            **dict(details),
+        }
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False))
+            fh.write("\n")
+    except Exception:
+        # Logging must never break runtime behavior
+        pass
 
 
 class SharedSession:
@@ -403,6 +425,43 @@ def _resolve_pi_command(config: Any) -> list[str]:
     return ["npx", "pi"]
 
 
+def _resolve_gemini_command(config: Any, explicit: str | None) -> list[str]:
+    """Resolve how to launch the gemini CLI."""
+
+    if explicit:
+        return [explicit]
+    if isinstance(config, str):
+        return [config]
+    if isinstance(config, Iterable):
+        cmd = [str(part) for part in config]
+        if cmd:
+            return cmd
+
+    packaged = _packaged_gemini_bundle()
+    if packaged:
+        node_path = shutil.which("node")
+        if not node_path:
+            raise RuntimeError(
+                "Node.js (node) is required to run the packaged gemini.js. Install Node 20+ or set GEMINI command explicitly."
+            )
+        return [node_path, packaged]
+
+    gemini_path = shutil.which("gemini")
+    if gemini_path:
+        return [gemini_path]
+    return ["npx", "@google/gemini-cli@latest"]
+
+
+def _packaged_gemini_bundle() -> str | None:
+    try:
+        candidate = importlib_resources.files(__package__).joinpath("bin/gemini.js")
+        if candidate.is_file():
+            return str(candidate)
+    except Exception:
+        return None
+    return None
+
+
 class PiProcess:
     def __init__(
         self, settings: Mapping[str, Any], extra_env: Mapping[str, str] | None
@@ -423,6 +482,7 @@ class PiProcess:
         self._proc: subprocess.Popen[str] | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
+        self._last_stderr: list[str] = []
         self._start()
 
     @property
@@ -496,8 +556,12 @@ class PiProcess:
         if not proc or not proc.stderr:
             return
         try:
-            for _ in proc.stderr:
-                continue
+            self._last_stderr = []
+            for line in proc.stderr:
+                if line:
+                    self._last_stderr.append(line.rstrip())
+                    if len(self._last_stderr) > 50:
+                        self._last_stderr = self._last_stderr[-50:]
         finally:
             try:
                 proc.stderr.close()
@@ -529,6 +593,11 @@ class PiProcess:
         try:
             proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
+        except BrokenPipeError as exc:
+            raise RuntimeError(
+                "Failed to send request to pi backend: Broken pipe. "
+                'Please run cleon.auth("claude") to authenticate.'
+            ) from exc
         except Exception as exc:
             raise RuntimeError(f"Failed to send request to pi backend: {exc}") from exc
 
@@ -551,7 +620,22 @@ class PiProcess:
                 # surface a meaningful error instead of crashing.
                 continue
             if raw.get("type") == "pi.process_exit":
-                raise RuntimeError("pi backend exited unexpectedly.")
+                stderr_output = (
+                    "\n".join(self._last_stderr[-10:]) if self._last_stderr else ""
+                )
+                hint = ""
+                if (
+                    "no api key" in stderr_output.lower()
+                    and "anthropic" in stderr_output.lower()
+                ):
+                    hint = ' pi has no Claude API key. Please run cleon.auth("claude").'
+                elif (
+                    "auth" in stderr_output.lower() or "login" in stderr_output.lower()
+                ):
+                    hint = " Try running cleon.auth() to authenticate."
+                elif stderr_output:
+                    hint = f"\nStderr: {stderr_output}"
+                raise RuntimeError(f"pi backend exited unexpectedly.{hint}")
             if raw.get("type") == "error":
                 raise RuntimeError(raw.get("error") or "pi backend reported an error.")
             translated = _translate_pi_event(raw)
@@ -573,7 +657,7 @@ class PiProcess:
 
 class PiBackend:
     name = "claude"
-    supports_async = False
+    supports_async = True
 
     def __init__(
         self,
@@ -641,6 +725,332 @@ class PiBackend:
         return self._process.alive
 
 
+class GeminiProcess:
+    """Threaded Gemini CLI process with async support."""
+
+    def __init__(
+        self,
+        settings: Mapping[str, Any],
+        extra_env: Mapping[str, str] | None,
+        explicit_binary: str | None,
+    ) -> None:
+        self._settings = settings
+        self._env = os.environ.copy()
+        if extra_env:
+            for key, value in extra_env.items():
+                self._env[str(key)] = str(value)
+        env_override = settings.get("env")
+        if isinstance(env_override, Mapping):
+            for key, value in env_override.items():
+                self._env[str(key)] = str(value)
+
+        self._cmd = _resolve_gemini_command(settings.get("command"), explicit_binary)
+        self._timeout = float(settings.get("response_timeout") or 240.0)
+        self._log_prefix = "[gemini]"
+        self._proc: subprocess.Popen[str] | None = None
+        self._queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._start()
+
+    def _build_command(self) -> list[str]:
+        cmd = list(self._cmd)
+        base_args = ["--output-format", "stream-json", "--stdin-rpc"]
+
+        model = self._settings.get("model")
+        if model:
+            base_args.extend(["--model", str(model)])
+
+        approval = self._settings.get("approval_mode")
+        if approval:
+            if str(approval).lower() == "yolo":
+                base_args.append("--yolo")
+            else:
+                base_args.extend(["--approval-mode", str(approval)])
+
+        allowed_tools = self._settings.get("allowed_tools")
+        if isinstance(allowed_tools, Iterable):
+            tools = [str(t) for t in allowed_tools if str(t)]
+            if tools:
+                base_args.extend(["--allowed-tools", ",".join(tools)])
+
+        extra_args: list[str] = []
+        arg_setting = self._settings.get("args")
+        if isinstance(arg_setting, str):
+            extra_args = [arg_setting]
+        elif isinstance(arg_setting, Iterable):
+            extra_args = [str(part) for part in arg_setting]
+
+        return [str(part) for part in (cmd + base_args + extra_args)]
+
+    def _start(self) -> None:
+        command = self._build_command()
+        start_time = time.time()
+        _log_backend_event(
+            "gemini",
+            "process.start",
+            {
+                "cmd": command,
+                "cwd": os.getcwd(),
+                "env_override": bool(self._settings.get("env")),
+            },
+        )
+        try:
+            self._proc = subprocess.Popen(
+                command,
+                env=self._env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            _log_backend_event(
+                "gemini",
+                "process.started",
+                {
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                    "cmd": command,
+                },
+            )
+        except FileNotFoundError as exc:
+            _log_backend_event(
+                "gemini",
+                "process.error",
+                {"error": str(exc), "cmd": command},
+            )
+            raise RuntimeError(
+                "Gemini CLI is not installed. Install with `npm install -g @google/gemini-cli` "
+                "or `brew install gemini-cli`, or rely on npx by leaving command unset."
+            ) from exc
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _read_stdout(self) -> None:
+        proc = self._proc
+        if not proc or not proc.stdout:
+            return
+        try:
+            for line in proc.stdout:
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line.strip())
+                except Exception:
+                    continue
+                self._queue.put(parsed)
+        finally:
+            self._queue.put({"type": "gemini.process_exit"})
+
+    def _read_stderr(self) -> None:
+        proc = self._proc
+        if not proc or not proc.stderr:
+            return
+        try:
+            for _ in proc.stderr:
+                continue
+        finally:
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+        self._proc = None
+
+    def restart(self) -> None:
+        """Restart the Gemini CLI process."""
+        self.stop()
+        self._queue = queue.Queue()
+        self._start()
+
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _send(self, payload: dict[str, Any]) -> None:
+        proc = self._proc
+        if not proc or proc.stdin is None:
+            raise RuntimeError("Gemini backend is not running.")
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to send request to Gemini backend: {exc}"
+            ) from exc
+
+    def send_prompt(
+        self,
+        prompt: str,
+        on_event: Callable[[Any], None] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        start_ts = time.time()
+        _log_backend_event(
+            "gemini",
+            "send.start",
+            {"prompt_chars": len(prompt), "queue_size": self._queue.qsize()},
+        )
+        self._send({"type": "prompt", "message": prompt})
+        events: list[dict[str, Any]] = []
+        final_parts: list[str] = []
+        first_event_ts: float | None = None
+        last_raw: Mapping[str, Any] | None = None
+
+        while True:
+            try:
+                raw = self._queue.get(timeout=self._timeout)
+            except queue.Empty:
+                _log_backend_event(
+                    "gemini",
+                    "send.timeout",
+                    {"prompt_chars": len(prompt), "timeout_s": self._timeout},
+                )
+                raise RuntimeError("Timed out waiting for Gemini response.")
+
+            if not isinstance(raw, Mapping):
+                continue
+
+            if raw.get("type") == "gemini.process_exit":
+                _log_backend_event(
+                    "gemini",
+                    "process.exit",
+                    {"prompt_chars": len(prompt)},
+                )
+                raise RuntimeError("Gemini backend exited unexpectedly.")
+
+            translated = _translate_gemini_event(raw)
+            events.append(translated)
+            if first_event_ts is None:
+                first_event_ts = time.time()
+            last_raw = raw
+
+            if on_event:
+                try:
+                    on_event(translated)
+                except Exception:
+                    pass
+
+            if raw.get("type") == "message" and raw.get("role") == "assistant":
+                text = _extract_gemini_text(raw)
+                if text:
+                    final_parts.append(text)
+
+            if raw.get("type") == "result":
+                break
+
+        final_text = "\n".join(part for part in final_parts if part)
+        if not final_text:
+            final_text = "Gemini response completed."
+        _log_backend_event(
+            "gemini",
+            "send.complete",
+            {
+                "prompt_chars": len(prompt),
+                "events": len(events),
+                "first_event_ms": int((first_event_ts - start_ts) * 1000)
+                if first_event_ts
+                else None,
+                "total_ms": int((time.time() - start_ts) * 1000),
+                "stats": last_raw.get("stats")
+                if isinstance(last_raw, Mapping)
+                else None,
+            },
+        )
+        result = {"final_message": final_text, "agent": "gemini"}
+        return result, events
+
+    def _log(self, msg: str) -> None:
+        try:
+            sys.stderr.write(f"{self._log_prefix} {msg}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
+class GeminiBackend:
+    name = "gemini"
+    supports_async = True
+
+    def __init__(
+        self,
+        *,
+        binary: str | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        del session_id
+        settings = get_agent_settings("gemini")
+        self._process = GeminiProcess(settings, extra_env, binary)
+        self._send_lock = threading.Lock()
+        self._first_turn = True
+
+    def first_turn(self) -> bool:
+        return self._first_turn
+
+    def reset_first_turn(self) -> None:
+        with self._send_lock:
+            self._first_turn = True
+
+    def send(
+        self,
+        prompt: str,
+        *,
+        on_event: Callable[[Any], None] | None = None,
+        on_approval: Callable[[dict[str, Any]], str | None] | None = None,
+    ) -> tuple[Any, list[Any]]:
+        del on_approval
+        with self._send_lock:
+            retry_once = True
+            while True:
+                try:
+                    result, events = self._process.send_prompt(
+                        prompt, on_event=on_event
+                    )
+                    self._first_turn = False
+                    return result, events
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    transient = (
+                        "gemini backend exited unexpectedly" in msg
+                        or "gemini backend is not running" in msg
+                    )
+                    if transient and retry_once:
+                        retry_once = False
+                        try:
+                            _log_backend_event(
+                                "gemini",
+                                "process.restart",
+                                {"reason": msg},
+                            )
+                            self._process.restart()
+                            continue
+                        except Exception:
+                            pass
+                    raise
+
+    def run_once(self, prompt: str) -> tuple[Any, list[Any]]:
+        return self.send(prompt)
+
+    def stop(self) -> SessionStopInfo:
+        self._process.stop()
+        return SessionStopInfo(None, None)
+
+    def session_alive(self) -> bool:
+        return self._process.alive
+
+
 def resolve_backend(
     *,
     agent: str,
@@ -653,6 +1063,8 @@ def resolve_backend(
         return CodexBackend(binary=binary, extra_env=extra_env, session_id=session_id)
     if agent_name in {"claude", "anthropic"}:
         return PiBackend(binary=binary, extra_env=extra_env, session_id=session_id)
+    if agent_name in {"gemini"}:
+        return GeminiBackend(binary=binary, extra_env=extra_env, session_id=session_id)
     raise ValueError(f"Unknown cleon backend '{agent}'.")
 
 
@@ -701,3 +1113,37 @@ def _extract_pi_text(message: Any) -> str:
     return "\n".join(
         part.strip() for part in parts if isinstance(part, str) and part.strip()
     )
+
+
+def _translate_gemini_event(event: dict[str, Any]) -> dict[str, Any]:
+    etype = event.get("type")
+    if not isinstance(etype, str):
+        return {"type": "gemini.event", "event": event}
+    payload: dict[str, Any] = {"type": f"gemini.{etype}"}
+    if etype == "message":
+        payload["text"] = _extract_gemini_text(event)
+        payload["raw"] = event
+        if isinstance(event.get("role"), str):
+            payload["role"] = event.get("role")
+    if etype in {"tool_use", "tool_result"}:
+        payload.update({k: v for k, v in event.items() if k != "type"})
+    if etype == "result" and "stats" in event:
+        payload["stats"] = event.get("stats")
+    return payload
+
+
+def _extract_gemini_text(event: dict[str, Any]) -> str:
+    content = event.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                val = item.get("content")
+            else:
+                val = None
+            if isinstance(val, str):
+                parts.append(val)
+        return "\n".join(part.strip() for part in parts if part)
+    return ""

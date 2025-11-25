@@ -8,6 +8,7 @@ import importlib.resources as importlib_resources
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -40,6 +41,15 @@ except Exception:  # pragma: no cover - fallback when IPython is missing
 
 from collections import deque
 
+try:
+    from pygments import highlight  # type: ignore[import-untyped]
+    from pygments.lexers import get_lexer_by_name, TextLexer  # type: ignore[import-untyped]
+    from pygments.formatters import HtmlFormatter  # type: ignore[import-untyped]
+
+    _PYGMENTS_AVAILABLE = True
+except ImportError:
+    _PYGMENTS_AVAILABLE = False
+
 from .backend import AgentBackend, resolve_backend
 from .settings import (
     get_agent_prefix,
@@ -52,6 +62,7 @@ from .settings import (
     default_mode as settings_default_mode,
     reset_settings as settings_reset,
     plain_text_output,
+    load_settings,
 )
 
 DisplayMode = str
@@ -61,13 +72,14 @@ _ACTIVE_BACKEND_NAME: str | None = None
 _AGENT_HISTORY: Any = {}
 _HISTORY_LIMIT = 8
 _BASE_STYLE_EMITTED = False
-_LOG_PATH: str | None = None
+_DEFAULT_LOG_PATH = os.environ.get("CLEON_LOG_PATH", "./cleon.log")
+_LOG_PATH: str | None = _DEFAULT_LOG_PATH if _DEFAULT_LOG_PATH else None
 _CONVERSATION_LOG_PATH: str | None = None
 _CANCEL_PATH: str | None = None
 _CONTEXT_TRACKER: "ContextTracker | None" = None
 _ASYNC_MODE: bool = False
-_CODEX_QUEUE: "queue.Queue[CodexRequest | None] | None" = None
-_WORKER_THREAD: threading.Thread | None = None
+_AGENT_QUEUES: dict[str, "queue.Queue[CodexRequest | None]"] = {}
+_AGENT_WORKERS: dict[str, threading.Thread] = {}
 _AUTO_ROUTE_INSTALLED = False
 _ORIG_RUN_CELL = None
 _AUTO_ROUTE_RULES: dict[str, tuple[str, str]] = {}
@@ -81,6 +93,14 @@ _ASYNC_IDLE = threading.Event()
 _ASYNC_IDLE.set()
 _AGENT_HISTORY_LOCK = threading.Lock()
 _CONTEXT_LOCK = threading.Lock()
+
+if _LOG_PATH:
+    try:
+        Path(_LOG_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("CLEON_LOG_PATH", _LOG_PATH)
+    except Exception:
+        # Logging is best-effort; never block import.
+        pass
 
 _AGENT_THEMES = {
     "codex": {
@@ -99,6 +119,14 @@ _AGENT_THEMES = {
         "dark_border": "#4A4A45",
         "dark_color": "#F7F5F2",
     },
+    "gemini": {
+        "light_bg": "#1F2233",
+        "light_border": "#2E3A4A",
+        "light_color": "#F3F6FF",
+        "dark_bg": "#0F1624",
+        "dark_border": "#223047",
+        "dark_color": "#E4ECFF",
+    },
     "default": {
         "light_bg": "#1F1F23",
         "light_border": "#3a3a40",
@@ -112,6 +140,7 @@ _AGENT_THEMES = {
 _AGENT_ICON_PATHS = {
     "codex": "images/codex-white.png",
     "claude": "images/claude.png",
+    "gemini": "images/gemini.png",
 }
 _ICON_STYLES_APPLIED = False
 
@@ -270,7 +299,10 @@ def _mark_async_done() -> None:
     global _ACTIVE_ASYNC_COUNT
     with _ACTIVE_ASYNC_LOCK:
         _ACTIVE_ASYNC_COUNT = max(0, _ACTIVE_ASYNC_COUNT - 1)
-        if (_CODEX_QUEUE is None or _CODEX_QUEUE.empty()) and _ACTIVE_ASYNC_COUNT == 0:
+        all_empty = (
+            all(q.empty() for q in _AGENT_QUEUES.values()) if _AGENT_QUEUES else True
+        )
+        if all_empty and _ACTIVE_ASYNC_COUNT == 0:
             _ASYNC_IDLE.set()
 
 
@@ -278,10 +310,12 @@ def _wait_for_async_tasks() -> None:
     if not _ASYNC_MODE:
         return
     while True:
-        queue_empty = _CODEX_QUEUE is None or _CODEX_QUEUE.empty()
+        all_empty = (
+            all(q.empty() for q in _AGENT_QUEUES.values()) if _AGENT_QUEUES else True
+        )
         with _ACTIVE_ASYNC_LOCK:
             active = _ACTIVE_ASYNC_COUNT
-        if queue_empty and active == 0:
+        if all_empty and active == 0:
             _ASYNC_IDLE.set()
             return
         time.sleep(0.05)
@@ -292,14 +326,14 @@ def _active_async_requests() -> int:
         return _ACTIVE_ASYNC_COUNT
 
 
-def _worker_loop() -> None:
-    """Background worker that processes codex requests from queue."""
-    global _CODEX_QUEUE
+def _worker_loop(agent_name: str) -> None:
+    """Background worker that processes requests from an agent's queue."""
     while True:
         try:
-            if _CODEX_QUEUE is None or _CANCEL_ALL.is_set():
+            agent_queue = _AGENT_QUEUES.get(agent_name)
+            if agent_queue is None or _CANCEL_ALL.is_set():
                 break
-            request = _CODEX_QUEUE.get(timeout=0.5)
+            request = agent_queue.get(timeout=0.5)
             if request is None:  # Poison pill to stop worker
                 break
             with _CANCELLED_LOCK:
@@ -336,30 +370,48 @@ def _worker_loop() -> None:
             pass
 
 
-def _start_worker_thread() -> None:
-    """Start background worker thread if not already running."""
-    global _CODEX_QUEUE, _WORKER_THREAD
-    if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
-        return
+def _start_worker_thread(agent_name: str = "codex") -> None:
+    """Start background worker thread for an agent if not already running."""
     _CANCEL_ALL.clear()
-    if _CODEX_QUEUE is None:
-        _CODEX_QUEUE = queue.Queue()
-    _WORKER_THREAD = threading.Thread(
-        target=_worker_loop, daemon=True, name="codex-worker"
+    existing = _AGENT_WORKERS.get(agent_name)
+    if existing is not None and existing.is_alive():
+        return
+    if agent_name not in _AGENT_QUEUES:
+        _AGENT_QUEUES[agent_name] = queue.Queue()
+    worker = threading.Thread(
+        target=_worker_loop,
+        args=(agent_name,),
+        daemon=True,
+        name=f"{agent_name}-worker",
     )
-    _WORKER_THREAD.start()
+    _AGENT_WORKERS[agent_name] = worker
+    worker.start()
 
 
-def _stop_worker_thread() -> None:
-    """Stop background worker thread cleanly."""
-    global _CODEX_QUEUE, _WORKER_THREAD
-    if _CODEX_QUEUE is not None:
-        _CODEX_QUEUE.put(None)  # Poison pill
-    if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
-        _WORKER_THREAD.join(timeout=2.0)
-    _CODEX_QUEUE = None
-    _WORKER_THREAD = None
-    _ASYNC_IDLE.set()
+def _stop_worker_thread(agent_name: str | None = None) -> None:
+    """Stop background worker thread(s) cleanly."""
+    if agent_name is not None:
+        # Stop specific agent
+        agent_queue = _AGENT_QUEUES.get(agent_name)
+        if agent_queue is not None:
+            agent_queue.put(None)  # Poison pill
+        worker = _AGENT_WORKERS.get(agent_name)
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=2.0)
+        _AGENT_QUEUES.pop(agent_name, None)
+        _AGENT_WORKERS.pop(agent_name, None)
+    else:
+        # Stop all agents
+        for name, q in list(_AGENT_QUEUES.items()):
+            q.put(None)
+        for name, w in list(_AGENT_WORKERS.items()):
+            if w.is_alive():
+                w.join(timeout=2.0)
+        _AGENT_QUEUES.clear()
+        _AGENT_WORKERS.clear()
+    # Check if all idle
+    if not _AGENT_QUEUES and _ACTIVE_ASYNC_COUNT == 0:
+        _ASYNC_IDLE.set()
 
 
 def _cancel_request(request_id: str, display_id: str) -> None:
@@ -389,11 +441,11 @@ def _cancel_all(display_id: str | None = None) -> None:
                 except Exception:
                     pass
         _PENDING_REQUESTS.clear()
-    # Drain any queued requests
-    if _CODEX_QUEUE is not None:
+    # Drain any queued requests from all agent queues
+    for agent_queue in list(_AGENT_QUEUES.values()):
         try:
             while True:
-                req = _CODEX_QUEUE.get_nowait()
+                req = agent_queue.get_nowait()
                 if isinstance(req, CodexRequest):
                     try:
                         update_display(
@@ -418,13 +470,16 @@ def _cancel_all(display_id: str | None = None) -> None:
         _ASYNC_IDLE.set()
 
 
-def _reset_cancellations() -> None:
+def _reset_cancellations(agent_name: str = "codex") -> None:
     _CANCEL_ALL.clear()
     with _CANCELLED_LOCK:
         _CANCELLED_REQUESTS.clear()
         _PENDING_REQUESTS.clear()
-    _start_worker_thread()
-    if _CODEX_QUEUE is None or _CODEX_QUEUE.empty():
+    _start_worker_thread(agent_name)
+    all_empty = (
+        all(q.empty() for q in _AGENT_QUEUES.values()) if _AGENT_QUEUES else True
+    )
+    if all_empty:
         _ASYNC_IDLE.set()
 
 
@@ -634,11 +689,9 @@ def register_magic(
     _register_backend(normalized, backend)
     agent_prefix = get_agent_prefix(backend_name)
 
-    # Only log by default when debug/show_events is on; otherwise keep logs off unless explicitly set
+    # Default to writing a log so we can capture timing/diagnostics automatically.
     effective_log_path = (
-        log_path
-        if log_path is not None
-        else ("./cleon.log" if debug or show_events else None)
+        str(log_path) if log_path is not None else (_LOG_PATH or "./cleon.log")
     )
     _configure_logging(effective_log_path)
     _configure_conversation_log()
@@ -649,22 +702,19 @@ def register_magic(
     # Configure async mode
     global _ASYNC_MODE
     if async_mode and not getattr(backend, "supports_async", True):
-        print(
-            f"Backend '{backend_name}' does not support async mode; falling back to synchronous turns."
-        )
         async_mode = False
     _ASYNC_MODE = async_mode
     if async_mode:
-        _start_worker_thread()
+        _start_worker_thread(normalized)
         # Register cleanup handler for kernel shutdown
         try:
             import atexit
 
-            atexit.register(_stop_worker_thread)
+            atexit.register(lambda: _stop_worker_thread(normalized))
         except Exception:
             pass
 
-    emit_events = show_events or debug
+    emit_events = show_events
 
     def _codex_magic(line: str, cell: str | None = None) -> Any:
         prompt = _normalize_payload(line, cell)
@@ -761,14 +811,15 @@ def register_magic(
 
         # Async mode: queue request and return immediately
         if async_mode:
-            _reset_cancellations()
-            display_id = f"codex-{uuid.uuid4().hex[:8]}"
+            _reset_cancellations(normalized)
+            display_id = f"{normalized}-{uuid.uuid4().hex[:8]}"
             request_id = f"req-{uuid.uuid4().hex[:8]}"
             with _CANCELLED_LOCK:
                 _PENDING_REQUESTS[request_id] = display_id
 
-            # Show queue position
-            queue_size = _CODEX_QUEUE.qsize() if _CODEX_QUEUE else 0
+            # Show queue position for this agent's queue
+            agent_queue = _AGENT_QUEUES.get(normalized)
+            queue_size = agent_queue.qsize() if agent_queue else 0
             if queue_size > 0:
                 status = f"⏳ Queued (position {queue_size + 1})"
             else:
@@ -776,7 +827,7 @@ def register_magic(
 
             _render_async_status(display_id, request_id, status, cancellable=True)
 
-            # Submit to queue
+            # Submit to this agent's queue
             request = CodexRequest(
                 backend=active_backend,
                 prompt=prompt,
@@ -788,8 +839,9 @@ def register_magic(
                 mode=mode,
                 emit_events=emit_events,
             )
-            if _CODEX_QUEUE is not None:
-                _CODEX_QUEUE.put(request)
+            agent_queue = _AGENT_QUEUES.get(normalized)
+            if agent_queue is not None:
+                agent_queue.put(request)
                 _ASYNC_IDLE.clear()
 
             return None
@@ -843,6 +895,8 @@ def register_magic(
                 on_event=_chain(progress.update, _log_event),
                 on_approval=_prompt_approval,
             )
+            if isinstance(result, dict) and not result.get("final_message"):
+                result["final_message"] = "(no output received)"
         except Exception as exc:  # pragma: no cover - surfaced to notebook
             if "pi backend" in str(exc).lower():
                 msg = (
@@ -874,7 +928,11 @@ def register_magic(
     if auto:
         _enable_auto_route(ip, normalized, backend_name, agent_prefix)
     pretty_name = backend_name.capitalize()
-    print(f"{pretty_name} session started.\n")
+    print(f"{pretty_name} session started.")
+    if backend_name == "gemini":
+        print("Warning: Gemini support is slow.\n")
+    else:
+        print()
     if backend_name == "codex":
         help()
     return None  # type: ignore[return-value]
@@ -889,7 +947,28 @@ def register_codex_magic(**kwargs: Any) -> Callable[[str, str | None], Any]:
 def load_ipython_extension(ipython) -> None:
     """Hook for ``%load_ext cleon.magic``."""
 
-    use(ipython=ipython)
+    # Register common magics up front so the user can type %%codex / %%claude / %%gemini immediately.
+    # Use lazy binding: start session on first invocation, not at load time.
+    for magic_name, agent_name in (
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("gemini", "gemini"),
+    ):
+        try:
+
+            def _make_lazy(mn: str, an: str):
+                def _runner(line: str, cell: str | None = None) -> Any:
+                    return register_magic(name=mn, agent=an, auto=False)(line, cell)
+
+                return _runner
+
+            ipython.register_magic_function(
+                _make_lazy(magic_name, agent_name),
+                magic_kind="cell",
+                magic_name=magic_name,
+            )
+        except Exception:
+            pass
     # Register custom history cell magic under a unique name to avoid clash with built-in %history
     ipython.register_magic_function(
         history_magic, magic_kind="cell", magic_name="cleon_history"
@@ -899,13 +978,18 @@ def load_ipython_extension(ipython) -> None:
 def help() -> None:
     """Return concise help text without auto-displaying in notebooks."""
 
-    text = """Add a `>` or `~` before your prompt to invoke Codex or Claude:
-                 
-> &gt; Whats your name?  
+    text = """**Pick an agent with a prefix:**
+
+```
+@ Whats your name?
 I am Codex!
 
 ~ Whats your name?
 I'm Claude, Anthropic's AI assistant!
+
+> Whats your name?
+I'm Gemini, Google's AI assistant! (use `%%gemini`)
+```
 """
     display(Markdown(text))
 
@@ -925,24 +1009,27 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
     if _ASYNC_MODE:
         if wait_for_tasks:
             _wait_for_async_tasks()
-        _stop_worker_thread()
+        _stop_worker_thread(agent_name)
     return session_id
 
 
 def status() -> dict[str, Any]:
-    queued = _CODEX_QUEUE.qsize() if _CODEX_QUEUE is not None else 0
+    # Sum queued requests across all agent queues
+    total_queued = sum(q.qsize() for q in _AGENT_QUEUES.values())
+    per_agent_queued = {name: q.qsize() for name, q in _AGENT_QUEUES.items()}
     backends_status = {}
     for name, backend in _BACKENDS.items():
         backends_status[name] = {
             "agent": getattr(backend, "name", name),
             "alive": backend.session_alive(),
+            "queued": per_agent_queued.get(name, 0),
         }
     runtime = {
         "active_agent": getattr(_ACTIVE_BACKEND, "name", None)
         if _ACTIVE_BACKEND
         else None,
         "async_mode": _ASYNC_MODE,
-        "queued_requests": queued,
+        "queued_requests": total_queued,
         "active_requests": _active_async_requests(),
         "backends": backends_status,
     }
@@ -960,7 +1047,7 @@ def status() -> dict[str, Any]:
         "cleon status - "
         f"agent: {current_agent or 'none'}, "
         f"session: {'alive' if alive else 'stopped'}, "
-        f"async queued: {queued}, "
+        f"async queued: {total_queued}, "
         f"in-flight: {runtime['active_requests']}"
     )
     return result
@@ -1181,9 +1268,15 @@ def _ensure_ipython(ipython) -> Any:
 def _enable_auto_route(ip, magic_name: str, agent_name: str, prefix: str) -> None:
     """Intercept run_cell to auto-route natural language cells to cleon magics."""
 
-    global _AUTO_ROUTE_INSTALLED, _ORIG_RUN_CELL
     if prefix:
         _AUTO_ROUTE_RULES[prefix] = (agent_name, magic_name)
+    _install_auto_route_wrapper(ip)
+
+
+def _install_auto_route_wrapper(ip) -> None:
+    """Install the run_cell wrapper once; updating rules happens separately."""
+
+    global _AUTO_ROUTE_INSTALLED, _ORIG_RUN_CELL
     if _AUTO_ROUTE_INSTALLED:
         return
     orig = getattr(ip, "run_cell", None)
@@ -1384,17 +1477,54 @@ def _render_markdown_fallback(content: str) -> str:
         if not code_buf:
             return
         code_text = "\n".join(code_buf)
-        escaped = html.escape(code_text)
-        lang_class = f"language-{html.escape(code_lang)}" if code_lang else ""
-        parts.append(
-            "<pre style='margin:8px 0 10px 0; padding:10px 12px; "
-            "white-space:pre-wrap; background:rgba(0,0,0,0.08); "
-            "border:1px solid rgba(255,255,255,0.08); border-radius:8px;"
-            'font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;'
-            "font-size:0.95em;'>"
-            f"<code class='{lang_class}'>{escaped}</code>"
-            "</pre>"
+
+        code_id = f"code-{uuid.uuid4().hex[:8]}"
+        copy_btn = (
+            f"<button onclick=\"navigator.clipboard.writeText(document.getElementById('{code_id}').textContent)"
+            ".then(() => {{ this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); }})"
+            f".catch(() => {{}})\" style='position:absolute; top:6px; right:6px; "
+            "background:rgba(255,255,255,0.1); border:none; border-radius:4px; "
+            "padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; "
+            "opacity:0.7; transition:opacity 0.2s;' "
+            "onmouseover=\"this.style.opacity='1'\" "
+            "onmouseout=\"this.style.opacity='0.7'\">📋</button>"
         )
+
+        if _PYGMENTS_AVAILABLE and code_lang:
+            try:
+                lexer = get_lexer_by_name(code_lang, stripall=True)
+            except Exception:
+                lexer = TextLexer()
+            formatter = HtmlFormatter(
+                nowrap=True,
+                noclasses=True,
+                style="monokai",
+            )
+            highlighted = highlight(code_text, lexer, formatter)
+            parts.append(
+                f"<div style='position:relative; margin:8px 0 10px 0;'>{copy_btn}"
+                "<pre style='margin:0; padding:10px 12px; padding-right:50px; "
+                "white-space:pre-wrap; background:#272822; color:#f8f8f2; "
+                "border:1px solid rgba(255,255,255,0.1); border-radius:8px; "
+                "overflow-x:auto;'>"
+                f"<code id='{code_id}' style='font-family:\"Fira Code\",SFMono-Regular,Consolas,"
+                '"Liberation Mono",Menlo,monospace; font-size:0.9em; '
+                f"line-height:1.5; background:transparent;'>{highlighted}</code>"
+                "</pre></div>"
+            )
+        else:
+            escaped = html.escape(code_text)
+            lang_class = f"language-{html.escape(code_lang)}" if code_lang else ""
+            parts.append(
+                f"<div style='position:relative; margin:8px 0 10px 0;'>{copy_btn}"
+                "<pre style='margin:0; padding:10px 12px; padding-right:50px; "
+                "white-space:pre-wrap; background:#272822; "
+                "border:1px solid rgba(255,255,255,0.1); border-radius:8px;'>"
+                f"<code id='{code_id}' class='{lang_class}' style='font-family:\"Fira Code\",SFMono-Regular,"
+                'Consolas,"Liberation Mono",Menlo,monospace; font-size:0.9em; '
+                f"color:#f8f8f2; background:transparent;'>{escaped}</code>"
+                "</pre></div>"
+            )
         code_buf = []
 
     for line in lines:
@@ -1412,9 +1542,23 @@ def _render_markdown_fallback(content: str) -> str:
             code_buf.append(line)
         else:
             if line.strip():
+                # Render inline `code` spans while keeping plain text paragraphs.
+                segments = re.split(r"(`[^`]+`)", line)
+                rendered: list[str] = []
+                for seg in segments:
+                    if seg.startswith("`") and seg.endswith("`") and len(seg) >= 2:
+                        rendered.append(
+                            "<code style='background:#3e3d32; color:#f8f8f2; "
+                            "padding:2px 6px; border-radius:4px; "
+                            'font-family:"Fira Code",SFMono-Regular,Consolas,'
+                            '"Liberation Mono",Menlo,monospace; font-size:0.9em;\'>'
+                            f"{html.escape(seg[1:-1])}</code>"
+                        )
+                    else:
+                        rendered.append(html.escape(seg))
                 parts.append(
                     "<p style='margin:0 0 6px 0; line-height:1.45;'>"
-                    f"{html.escape(line)}</p>"
+                    f"{''.join(rendered)}</p>"
                 )
             else:
                 parts.append("<div style='height:6px'></div>")
@@ -1601,6 +1745,7 @@ def _configure_logging(path: str | os.PathLike[str] | None) -> None:
         return
     _LOG_PATH = str(path)
     Path(_LOG_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    os.environ["CLEON_LOG_PATH"] = _LOG_PATH
 
 
 def _configure_cancel(path: str | os.PathLike[str] | None) -> None:
@@ -1612,8 +1757,9 @@ def _log_event(event: Any) -> None:
     if _LOG_PATH is None:
         return
     try:
+        payload = {"ts": time.time(), "event": event}
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False))
+            f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
     except Exception:
         pass
@@ -1628,8 +1774,9 @@ def _log_prompt(prompt: str) -> None:
     if _LOG_PATH is None:
         return
     try:
+        payload = {"ts": time.time(), "type": "prompt", "data": prompt}
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "prompt", "data": prompt}, ensure_ascii=False))
+            f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
     except Exception:
         pass
@@ -1639,10 +1786,9 @@ def _log_template(template: str) -> None:
     if _LOG_PATH is None:
         return
     try:
+        payload = {"ts": time.time(), "type": "template", "data": template}
         with Path(_LOG_PATH).expanduser().open("a", encoding="utf-8") as f:
-            f.write(
-                json.dumps({"type": "template", "data": template}, ensure_ascii=False)
-            )
+            f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
     except Exception:
         pass
@@ -1701,6 +1847,47 @@ def _configure_conversation_log() -> None:
     if nb_name:
         _CONVERSATION_LOG_PATH = str(Path.cwd() / f"{nb_name}.log")
         Path(_CONVERSATION_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+
+def refresh_auto_route(ipython=None) -> None:
+    """Rebuild auto-route prefix rules based on current settings."""
+
+    ip = _ensure_ipython(ipython)
+    _AUTO_ROUTE_RULES.clear()
+    settings = load_settings()
+    agents = settings.get("agents", {})
+    for agent_name, cfg in agents.items():
+        magic_name = agent_name  # magic names follow agent keys
+        prefix = cfg.get("prefix") or ""
+        if prefix:
+            _AUTO_ROUTE_RULES[prefix] = (agent_name, magic_name)
+        # Ensure the magic is registered (lazy registration)
+        if not hasattr(ip, "magics_manager"):
+            continue
+        magics = getattr(ip.magics_manager, "magics", {})
+        cell_magics = magics.get("cell", {})
+        if magic_name not in cell_magics:
+            # Register lazy magic that will initialize backend on first use
+            def _make_lazy(mn: str, an: str):
+                def _runner(line: str, cell: str | None = None) -> Any:
+                    # Initialize the backend (this re-registers the magic with the real handler)
+                    register_magic(name=mn, agent=an, auto=False)
+                    # Now get the real magic function and call it
+                    real_magics = getattr(ip.magics_manager, "magics", {})
+                    real_cell_magics = real_magics.get("cell", {})
+                    real_fn = real_cell_magics.get(mn)
+                    if real_fn is not None:
+                        return real_fn(line, cell)
+                    return None
+
+                return _runner
+
+            ip.register_magic_function(
+                _make_lazy(magic_name, agent_name),
+                magic_kind="cell",
+                magic_name=magic_name,
+            )
+    _install_auto_route_wrapper(ip)
 
 
 def _log_conversation(prompt: str, response: str) -> None:
