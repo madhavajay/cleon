@@ -1,6 +1,6 @@
 [package]
 name = "cleon"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 authors = ["Madhava Jay <me@madhavajay.com>"]
 
