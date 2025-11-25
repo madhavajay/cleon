@@ -46,7 +46,60 @@ __all__ = [
     "history_magic",
     "help",
     "SharedSession",
+    "install_extension",
+    "has_extension",
 ]
+
+
+def has_extension() -> bool:
+    """Check if cleon-jupyter-extension is installed and available."""
+    import importlib.util
+
+    return importlib.util.find_spec("cleon_cell_control") is not None
+
+
+def install_extension() -> None:
+    """Install the cleon-jupyter-extension for advanced notebook features.
+
+    This extension enables:
+    - Insert & run code snippets directly into cells below
+    - Programmatic cell manipulation from Python
+
+    After installation, restart JupyterLab to activate the extension.
+    """
+    import os
+    import subprocess
+    import sys
+
+    # Check if we're in dev mode
+    if os.environ.get("CLEON_DEV_MODE"):
+        print("⚠️  Dev mode detected (CLEON_DEV_MODE is set)")
+        print("   Extension should be installed via: ./jupyter.sh")
+        return
+
+    # Check if already installed
+    if has_extension():
+        print("✅ cleon-jupyter-extension is already installed!")
+        print("   If JupyterLab doesn't show the extension, restart JupyterLab.")
+        return
+
+    print("📦 Installing cleon-jupyter-extension...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "cleon-jupyter-extension"]
+        )
+        print("")
+        print("✅ Installation complete!")
+        print("")
+        print("⚠️  IMPORTANT: You must restart JupyterLab for the extension to load.")
+        print("   1. Save your work")
+        print("   2. Stop JupyterLab (Ctrl+C in terminal)")
+        print("   3. Start JupyterLab again")
+        print("")
+        print("After restart, code snippets will have a ▶ button to insert & run.")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Installation failed: {e}")
+        print("   Try manually: pip install cleon-jupyter-extension")
 
 
 # Expose help() at top-level for convenience
@@ -110,12 +163,126 @@ def auth(provider: str | None = None) -> None:
 _AUTO_INITIALIZED = False
 
 
+_EXTENSION_HINT_SHOWN = False
+
+
+_VERSION_CHECK_DONE = False
+
+
+def _get_current_version() -> str:
+    """Get the currently installed version of cleon."""
+    try:
+        from importlib.metadata import version
+
+        return version("cleon")
+    except Exception:
+        return "unknown"
+
+
+def _is_uv_environment() -> bool:
+    """Detect if we're running in a uv-managed environment."""
+    import os
+
+    # Check for UV_* environment variables
+    if any(k.startswith("UV_") for k in os.environ):
+        return True
+
+    # Check if uv is in the path and this venv was created by uv
+    venv_path = os.environ.get("VIRTUAL_ENV", "")
+    if venv_path:
+        # uv creates a .uv marker or uses specific structure
+        uv_marker = os.path.join(venv_path, ".uv")
+        if os.path.exists(uv_marker):
+            return True
+
+    # Check if 'uv' command is available and recently used
+    try:
+        import shutil
+
+        if shutil.which("uv"):
+            # Check pyvenv.cfg for uv signature
+            if venv_path:
+                cfg_path = os.path.join(venv_path, "pyvenv.cfg")
+                if os.path.exists(cfg_path):
+                    with open(cfg_path) as f:
+                        content = f.read()
+                        if "uv" in content.lower():
+                            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _check_for_updates() -> None:
+    """Check PyPI for newer version (runs 10% of the time)."""
+    global _VERSION_CHECK_DONE
+    if _VERSION_CHECK_DONE:
+        return
+    _VERSION_CHECK_DONE = True
+
+    import random
+
+    if random.random() > 0.10:  # Only check 10% of the time
+        return
+
+    import threading
+
+    def _do_check():
+        try:
+            import urllib.request
+            import json
+
+            current = _get_current_version()
+            if current == "unknown":
+                return
+
+            # Fetch latest version from PyPI
+            url = "https://pypi.org/pypi/cleon/json"
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "cleon-version-check"}
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                latest = data.get("info", {}).get("version", "")
+
+            if not latest or latest == current:
+                return
+
+            # Compare versions
+            def _parse_version(v: str) -> tuple:
+                """Parse version string into comparable tuple."""
+                parts: list[int | str] = []
+                for part in v.split("."):
+                    try:
+                        parts.append(int(part))
+                    except ValueError:
+                        parts.append(part)
+                return tuple(parts)
+
+            if _parse_version(latest) > _parse_version(current):
+                use_uv = _is_uv_environment()
+                cmd = "uv pip install -U cleon" if use_uv else "pip install -U cleon"
+
+                print(f"\n📦 New cleon version available: {current} → {latest}")
+                print(f"   Upgrade: {cmd}\n")
+
+        except Exception:
+            # Silently fail - version check is non-critical
+            pass
+
+    # Run in background thread to not block import
+    thread = threading.Thread(target=_do_check, daemon=True)
+    thread.start()
+
+
 def _auto_register_magic() -> None:
-    global _AUTO_INITIALIZED
+    global _AUTO_INITIALIZED, _EXTENSION_HINT_SHOWN
     if _AUTO_INITIALIZED:
         return
     try:
         from IPython import get_ipython  # type: ignore
+        import os
 
         ip = get_ipython()
         if ip is not None:
@@ -132,6 +299,17 @@ def _auto_register_magic() -> None:
                 refresh_auto_route(ipython=ip)
             except Exception as exc:
                 print(f"Failed to refresh auto-route: {exc}")
+
+            # Show extension hint once (unless in dev mode)
+            if not _EXTENSION_HINT_SHOWN and not os.environ.get("CLEON_DEV_MODE"):
+                if not has_extension():
+                    print("💡 Tip: Run cleon.install_extension() for advanced features")
+                    print("   (insert & run code snippets directly into cells)")
+                _EXTENSION_HINT_SHOWN = True
+
+            # Check for updates (10% of the time, in background)
+            _check_for_updates()
+
             _AUTO_INITIALIZED = True
     except Exception:
         pass

@@ -123,3 +123,41 @@ jobs:
           uv pip install maturin
           uv run -- maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/cleon/Cargo.toml --out dist
           ls -l dist/*.whl
+
+  extension-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install JupyterLab
+        run: pip install jupyterlab>=4.0.0
+
+      - name: Install Node dependencies
+        working-directory: extension
+        run: npm install
+
+      - name: Build TypeScript
+        working-directory: extension
+        run: npm run build:lib:prod
+
+      - name: Build JupyterLab extension
+        working-directory: extension
+        run: python -m jupyter labextension build .
+
+      - name: Verify extension package
+        working-directory: extension
+        run: |
+          ls -la cleon_cell_control/labextension/
+          test -f cleon_cell_control/labextension/package.json

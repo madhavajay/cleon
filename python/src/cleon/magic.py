@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import html
 import importlib.resources as importlib_resources
+import importlib.util
 import json
 import os
 import queue
@@ -64,6 +65,14 @@ from .settings import (
     plain_text_output,
     load_settings,
 )
+
+
+# Check for cleon-jupyter-extension
+def _has_cell_control_extension() -> bool:
+    return importlib.util.find_spec("cleon_cell_control") is not None
+
+
+_CELL_CONTROL_AVAILABLE = _has_cell_control_extension()
 
 DisplayMode = str
 _BACKENDS: dict[str, AgentBackend] = {}
@@ -1286,11 +1295,26 @@ def _install_auto_route_wrapper(ip) -> None:
     def _wrapped_run_cell(raw_cell, *args, **kwargs):
         try:
             text = raw_cell if isinstance(raw_cell, str) else ""
+
+            # Check for pure agent query (starts with prefix)
             detected = _detect_auto_route_target(text)
             if detected is not None:
                 target_magic, prompt_text = detected
                 routed_cell = f"%%{target_magic}\n{prompt_text}"
                 return orig(routed_cell, *args, **kwargs)
+
+            # Check for mixed cell (Python code + agent query)
+            split = _detect_mixed_cell(text)
+            if split is not None:
+                python_code, agent_query, target_magic, agent_prefix = split
+                # Replace current cell with just the Python code
+                _replace_current_cell(python_code)
+                # Run the Python code first
+                result = orig(python_code, *args, **kwargs)
+                # Queue the agent query to run in a new cell below
+                _queue_agent_cell(agent_query, target_magic, agent_prefix)
+                return result
+
         except Exception:
             pass  # On heuristic failure, fall back to normal execution
         return orig(raw_cell, *args, **kwargs)
@@ -1298,6 +1322,125 @@ def _install_auto_route_wrapper(ip) -> None:
     ip.run_cell = _wrapped_run_cell
     _ORIG_RUN_CELL = orig
     _AUTO_ROUTE_INSTALLED = True
+
+
+def _line_has_agent_prefix(line: str, prefixes: dict) -> tuple[str, str, str] | None:
+    """Check if a line starts with an agent prefix (with or without # comment).
+
+    Returns (matched_prefix, actual_prefix, magic_name) or None.
+
+    Matches:
+        @ query         -> ("@", "@", "codex")
+        # @ query       -> ("# @", "@", "codex")
+        ~ query         -> ("~", "~", "claude")
+        # ~ query       -> ("# ~", "~", "claude")
+    """
+    stripped = line.lstrip()
+    for prefix, (_, magic_name) in prefixes.items():
+        # Direct prefix match
+        if stripped.startswith(prefix):
+            return prefix, prefix, magic_name
+        # Commented prefix match: "# @" or "# ~" etc (strict: must be "# " + prefix)
+        commented_prefix = f"# {prefix}"
+        if stripped.startswith(commented_prefix):
+            return commented_prefix, prefix, magic_name
+    return None
+
+
+def _detect_mixed_cell(raw_cell: str) -> tuple[str, str, str, str] | None:
+    """Detect cells with Python code followed by an agent query.
+
+    Returns (python_code, agent_query, magic_name, actual_prefix) or None if not a mixed cell.
+
+    Examples:
+        print("test")
+        @ what do you think?
+
+        print("test")
+        # @ what do you think?   (agent commented the prefix)
+
+    Would return:
+        ("print(\"test\")", "what do you think?", "codex", "@")
+    """
+    if not raw_cell or not _AUTO_ROUTE_RULES:
+        return None
+
+    lines = raw_cell.splitlines()
+
+    # Find the first line that starts with an agent prefix
+    split_idx = None
+    matched_prefix = None
+    actual_prefix = None
+    matched_magic = None
+
+    for i, line in enumerate(lines):
+        match = _line_has_agent_prefix(line, _AUTO_ROUTE_RULES)
+        if match:
+            m_prefix, a_prefix, magic_name = match
+            # Make sure this isn't the first non-empty line (that's a pure agent query)
+            has_code_before = any(
+                ln.strip() and _line_has_agent_prefix(ln, _AUTO_ROUTE_RULES) is None
+                for ln in lines[:i]
+            )
+            if has_code_before:
+                split_idx = i
+                matched_prefix = m_prefix
+                actual_prefix = a_prefix
+                matched_magic = magic_name
+                break
+
+    if split_idx is None:
+        return None
+
+    # These are guaranteed non-None if split_idx is set
+    assert matched_prefix is not None
+    assert matched_magic is not None
+    assert actual_prefix is not None
+
+    # Split the cell
+    python_lines = lines[:split_idx]
+    agent_lines = lines[split_idx:]
+
+    python_code = "\n".join(python_lines).rstrip()
+    agent_text = "\n".join(agent_lines)
+
+    # Strip the prefix from the agent query (handles both "@ " and "# @ ")
+    agent_query = _strip_prompt_prefix(agent_text, matched_prefix)
+
+    # Don't split if there's no actual Python code
+    if not python_code.strip():
+        return None
+
+    return python_code, agent_query, matched_magic, actual_prefix
+
+
+def _queue_agent_cell(agent_query: str, magic_name: str, prefix: str) -> None:
+    """Queue an agent query to run in a new cell below after current cell completes."""
+    try:
+        if _CELL_CONTROL_AVAILABLE:
+            from cleon_cell_control import insert_and_run  # type: ignore[import-untyped]
+
+            # Use the prefix format (e.g., "@ query") not magic format
+            cell_content = f"{prefix} {agent_query}"
+            insert_and_run(cell_content)
+        else:
+            # Fallback: just print instruction
+            print("\n💡 Agent query detected but extension not installed.")
+            print("   Run: cleon.install_extension()")
+            print(f"   Or manually run:\n{prefix} {agent_query}")
+    except Exception as e:
+        print(f"⚠️ Could not queue agent cell: {e}")
+
+
+def _replace_current_cell(new_content: str) -> None:
+    """Replace the current cell's content (removes agent query part)."""
+    try:
+        if _CELL_CONTROL_AVAILABLE:
+            from cleon_cell_control import replace_cell
+
+            replace_cell(new_content)
+    except Exception:
+        pass  # Silently fail - cell will just keep original content
 
 
 def _detect_auto_route_target(raw_cell: str) -> tuple[str, str] | None:
@@ -1314,26 +1457,31 @@ def _detect_auto_route_target(raw_cell: str) -> tuple[str, str] | None:
 
 
 def _cell_has_prefix(raw_cell: str, prefix: str) -> bool:
+    """Check if cell starts with prefix (only first non-empty line needs prefix)."""
     lines = raw_cell.splitlines()
     non_empty = [ln for ln in lines if ln.strip()]
     if not non_empty:
         return False
-    for ln in non_empty:
-        if not ln.lstrip().startswith(prefix):
-            return False
-    return True
+    # Only check the first non-empty line for the prefix
+    return non_empty[0].lstrip().startswith(prefix)
 
 
 def _strip_prompt_prefix(text: str, prefix: str) -> str:
+    """Strip prefix from the first non-empty line only."""
     lines = text.splitlines()
     stripped_lines = []
+    prefix_stripped = False
     for ln in lines:
-        candidate = ln.lstrip()
-        if candidate.startswith(prefix):
-            cleaned = candidate[len(prefix) :]
-            if cleaned.startswith(" "):
-                cleaned = cleaned[1:]
-            stripped_lines.append(cleaned)
+        if not prefix_stripped and ln.strip():
+            candidate = ln.lstrip()
+            if candidate.startswith(prefix):
+                cleaned = candidate[len(prefix) :]
+                if cleaned.startswith(" "):
+                    cleaned = cleaned[1:]
+                stripped_lines.append(cleaned)
+                prefix_stripped = True
+            else:
+                stripped_lines.append(ln)
         else:
             stripped_lines.append(ln)
     return "\n".join(stripped_lines)
@@ -1479,16 +1627,63 @@ def _render_markdown_fallback(content: str) -> str:
         code_text = "\n".join(code_buf)
 
         code_id = f"code-{uuid.uuid4().hex[:8]}"
+
+        # Button styles
+        btn_style = (
+            "background:rgba(255,255,255,0.1); border:none; border-radius:4px; "
+            "padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; "
+            "opacity:0.7; transition:opacity 0.2s;"
+        )
+
         copy_btn = (
             f"<button onclick=\"navigator.clipboard.writeText(document.getElementById('{code_id}').textContent)"
             ".then(() => {{ this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); }})"
-            f".catch(() => {{}})\" style='position:absolute; top:6px; right:6px; "
-            "background:rgba(255,255,255,0.1); border:none; border-radius:4px; "
-            "padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; "
-            "opacity:0.7; transition:opacity 0.2s;' "
+            f".catch(() => {{}})\" style='position:absolute; top:6px; right:6px; {btn_style}' "
+            "title='Copy to clipboard' "
             "onmouseover=\"this.style.opacity='1'\" "
             "onmouseout=\"this.style.opacity='0.7'\">📋</button>"
         )
+
+        # Add run button if extension is available
+        run_btn = ""
+        if _CELL_CONTROL_AVAILABLE:
+            # Escape code for JavaScript template literal AND HTML attribute
+            escaped_for_js = (
+                code_text.replace("\\", "\\\\")  # Escape backslashes first
+                .replace("`", "\\`")  # Escape backticks for JS template literal
+                .replace("${", "\\${")  # Escape template literal interpolation
+                .replace("</", "<\\/")  # Escape script closing tags
+                .replace('"', "&quot;")  # Escape double quotes for HTML attribute
+            )
+            # JavaScript to handle commented agent queries (# @ -> @)
+            run_btn = (
+                f'<button onclick="'
+                f"if (window.cleonInsertAndRun) {{"
+                f"  var code = `{escaped_for_js}`;"
+                f"  var lines = code.split('\\n');"
+                f"  var firstLine = lines[0].trim();"
+                f"  if (firstLine.match(/^#\\s*[@~>]\\s/)) {{"
+                f"    lines[0] = firstLine.replace(/^#\\s*/, '');"
+                f"    code = lines.join('\\n');"
+                f"  }}"
+                f"  window.cleonInsertAndRun(code);"
+                f"  this.textContent='✓';"
+                f"  var btn = this;"
+                f"  setTimeout(function() {{ btn.textContent='▶'; }}, 1500);"
+                f"}} else {{"
+                f"  alert('Extension not loaded. Refresh the page.');"
+                f'}}" '
+                f"id='{code_id}_run' "
+                f"style='position:absolute; top:6px; right:36px; {btn_style}' "
+                f"title='Insert &amp; run in cell below' "
+                f"onmouseover=\"this.style.opacity='1'\" "
+                f"onmouseout=\"this.style.opacity='0.7'\">▶</button>"
+            )
+
+        buttons = run_btn + copy_btn
+
+        # Adjust padding for buttons (more space if run button exists)
+        padding_right = "80px" if _CELL_CONTROL_AVAILABLE else "50px"
 
         if _PYGMENTS_AVAILABLE and code_lang:
             try:
@@ -1502,8 +1697,8 @@ def _render_markdown_fallback(content: str) -> str:
             )
             highlighted = highlight(code_text, lexer, formatter)
             parts.append(
-                f"<div style='position:relative; margin:8px 0 10px 0;'>{copy_btn}"
-                "<pre style='margin:0; padding:10px 12px; padding-right:50px; "
+                f"<div style='position:relative; margin:8px 0 10px 0;'>{buttons}"
+                f"<pre style='margin:0; padding:10px 12px; padding-right:{padding_right}; "
                 "white-space:pre-wrap; background:#272822; color:#f8f8f2; "
                 "border:1px solid rgba(255,255,255,0.1); border-radius:8px; "
                 "overflow-x:auto;'>"
@@ -1516,8 +1711,8 @@ def _render_markdown_fallback(content: str) -> str:
             escaped = html.escape(code_text)
             lang_class = f"language-{html.escape(code_lang)}" if code_lang else ""
             parts.append(
-                f"<div style='position:relative; margin:8px 0 10px 0;'>{copy_btn}"
-                "<pre style='margin:0; padding:10px 12px; padding-right:50px; "
+                f"<div style='position:relative; margin:8px 0 10px 0;'>{buttons}"
+                f"<pre style='margin:0; padding:10px 12px; padding-right:{padding_right}; "
                 "white-space:pre-wrap; background:#272822; "
                 "border:1px solid rgba(255,255,255,0.1); border-radius:8px;'>"
                 f"<code id='{code_id}' class='{lang_class}' style='font-family:\"Fira Code\",SFMono-Regular,"
@@ -1794,28 +1989,43 @@ def _log_template(template: str) -> None:
         pass
 
 
-def _resolve_template(agent: str) -> str | None:
-    """Resolve template for agent via settings or local file fallback."""
-
-    template = template_for_agent(agent)
-    if template:
-        return template
-    return _load_template_file()
-
-
-def _load_template_file() -> str | None:
-    """Load template.md or prompts/learn.md from current working directory if it exists."""
+def _load_cleon_template(agent: str) -> str | None:
+    """Load cleon.md base template and substitute {agent} and {prefix} placeholders."""
     try:
-        candidates = [
-            Path.cwd() / "prompts" / "learn.md",
-            Path.cwd() / "template.md",
-        ]
-        for template_path in candidates:
-            if template_path.exists() and template_path.is_file():
-                return template_path.read_text(encoding="utf-8")
+        cleon_path = Path.cwd() / "prompts" / "cleon.md"
+        if cleon_path.exists() and cleon_path.is_file():
+            content = cleon_path.read_text(encoding="utf-8")
+            prefix = get_agent_prefix(agent)
+            return content.replace("{agent}", agent).replace("{prefix}", prefix)
     except Exception:
         pass
     return None
+
+
+def _load_mode_file(agent: str) -> str | None:
+    """Load mode template file (learn.md or do.md) based on agent's default mode."""
+    try:
+        mode = get_default_mode(agent)
+        mode_path = Path.cwd() / "prompts" / f"{mode}.md"
+        if mode_path.exists() and mode_path.is_file():
+            return mode_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_template(agent: str) -> str | None:
+    """Resolve template: cleon.md (base) + mode file (learn.md/do.md)."""
+    cleon_template = _load_cleon_template(agent)
+    if cleon_template:
+        parts = [cleon_template]
+        mode_template = _load_mode_file(agent)
+        if mode_template:
+            parts.append(mode_template)
+        return "\n\n".join(parts)
+
+    # Fallback to settings-based template
+    return template_for_agent(agent)
 
 
 def _get_notebook_name() -> str | None:
