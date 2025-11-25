@@ -4,3 +4,6 @@
 [submodule "pi-mono"]
 	path = pi-mono
 	url = https://github.com/badlogic/pi-mono.git
+[submodule "gemini-cli"]
+	path = gemini-cli
+	url = https://github.com/google-gemini/gemini-cli.git

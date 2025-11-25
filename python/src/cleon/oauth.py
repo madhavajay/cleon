@@ -67,6 +67,30 @@ def _save_credentials(provider: str, credentials: dict[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
+def login_pi() -> None:
+    """Run pi login to authenticate with Claude via the pi CLI."""
+    import subprocess
+    import shutil
+
+    pi_cmd = shutil.which("pi")
+    if not pi_cmd:
+        print(
+            "Error: pi CLI not found. Install it via `npm install -g @anthropic-ai/claude-code`"
+        )
+        return
+
+    print("Running pi login...")
+    try:
+        result = subprocess.run([pi_cmd, "login"], check=False)
+        if result.returncode == 0:
+            print("pi login successful.")
+            _refresh_active_claude_backend()
+        else:
+            print(f"pi login exited with code {result.returncode}")
+    except Exception as e:
+        print(f"Failed to run pi login: {e}")
+
+
 def login_claude() -> None:
     """Interactive OAuth login for Claude Pro/Max subscriptions."""
 

@@ -2,7 +2,7 @@
 set -e
 
 export UV_VENV_CLEAR=1
-uv venv
+uv venv .venv-lint
 uv pip install -e ./python
 uv pip install pytest ruff mypy vulture
 

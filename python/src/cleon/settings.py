@@ -13,7 +13,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "plain_text_output": False,
     "agents": {
         "codex": {
-            "prefix": ">",
+            "prefix": "@",
             "default_mode": "learn",
             "binary": None,
             "theme": {
@@ -54,6 +54,30 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "dark_color": "#F7F5F2",
             },
         },
+        "gemini": {
+            "prefix": ">",
+            "default_mode": "learn",
+            "binary": None,
+            "command": None,
+            "model": "gemini-2.5-flash",
+            "approval_mode": "auto_edit",  # or "yolo"; kept mild by default
+            "allowed_tools": [
+                "run_shell_command",
+                "read_file",
+                "write_file",
+            ],
+            "args": [],
+            "env": {},
+            "response_timeout": 240,
+            "theme": {
+                "light_bg": "#1F2233",
+                "light_border": "#2E3A4A",
+                "light_color": "#F3F6FF",
+                "dark_bg": "#0F1624",
+                "dark_border": "#223047",
+                "dark_color": "#E4ECFF",
+            },
+        },
     },
     "modes": {
         "learn": {
@@ -85,6 +109,26 @@ def _deep_update(target: dict[str, Any], updates: Mapping[str, Any]) -> dict[str
         else:
             target[key] = value
     return target
+
+
+def _set_path(target: dict[str, Any], path: str, value: Any) -> None:
+    parts = path.split(".")
+    cursor = target
+    for part in parts[:-1]:
+        if part not in cursor or not isinstance(cursor.get(part), dict):
+            cursor[part] = {}
+        cursor = cursor[part]  # type: ignore[assignment]
+    cursor[parts[-1]] = value
+
+
+def _get_path(source: Mapping[str, Any], path: str) -> Any:
+    parts = path.split(".")
+    cursor: Any = source
+    for part in parts:
+        if not isinstance(cursor, Mapping) or part not in cursor:
+            return None
+        cursor = cursor[part]
+    return cursor
 
 
 class SettingsManager:
@@ -145,7 +189,15 @@ def update_settings(updates: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def reset_settings() -> dict[str, Any]:
-    return _SETTINGS_MANAGER.reset()
+    data = _SETTINGS_MANAGER.reset()
+    # Refresh auto-route prefixes in notebooks if available.
+    try:
+        from . import magic  # type: ignore
+
+        magic.refresh_auto_route()
+    except Exception:
+        pass
+    return data
 
 
 _UNSET: Any = object()
@@ -156,21 +208,29 @@ def settings(key: Any = _UNSET, value: Any = _UNSET, **updates: Any) -> dict[str
 
     Usage:
     - settings() -> returns all settings
-    - settings(foo=True, bar=2) -> updates multiple keys
-    - settings("foo", True) -> updates a single key
+    - settings(foo=True, bar=2) -> updates multiple keys (keys can use dot or __ syntax)
+    - settings("foo", True) -> updates a single key (dot paths allowed)
+    - settings("foo.bar") -> reads a nested key
     """
 
-    if key is not _UNSET and value is _UNSET:
-        raise ValueError("When passing a key positionally, provide a value as well.")
+    # Read a single path
+    if key is not _UNSET and value is _UNSET and not updates:
+        path = str(key).replace("__", ".")
+        return _get_path(load_settings(), path)  # type: ignore[return-value]
 
     if key is not _UNSET:
         updates[str(key)] = value
 
     if not updates:
         return load_settings()
+
     flattened: dict[str, Any] = {}
-    for key, value in updates.items():
-        flattened[key] = value
+    for k, v in updates.items():
+        path = str(k).replace("__", ".")
+        if "." in path:
+            _set_path(flattened, path, v)
+        else:
+            flattened[path] = v
     return update_settings(flattened)
 
 
@@ -198,6 +258,24 @@ def get_default_mode(agent: str | None = None) -> str:
         if agent_cfg.get("default_mode"):
             return agent_cfg["default_mode"]
     return data.get("default_mode", "learn")
+
+
+def settings_table() -> str:
+    """Render a Markdown table summarizing key per-agent settings."""
+
+    data = load_settings()
+    agents = data.get("agents", {})
+    rows = ["| Agent | Prefix | Model | Command |", "|---|---|---|---|"]
+    for name, cfg in agents.items():
+        prefix = cfg.get("prefix", "")
+        model = cfg.get("model", "")
+        command = cfg.get("command") or cfg.get("binary") or "(auto)"
+        if isinstance(command, list):
+            command = " ".join(str(c) for c in command)
+        elif command is None:
+            command = "(auto)"
+        rows.append(f"| {name} | {prefix} | {model} | {command} |")
+    return "\n".join(rows)
 
 
 def add_mode(

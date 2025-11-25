@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._cleon import auth, run  # type: ignore[import-not-found]  # Re-export PyO3 bindings
+from ._cleon import auth as _codex_auth, run  # type: ignore[import-not-found]  # Re-export PyO3 bindings
 from .magic import (
     load_ipython_extension,
     register_codex_magic,
@@ -18,6 +18,7 @@ from .magic import (
     default_mode as default_mode_entry,
     reset as reset_runtime,
     sessions as list_sessions,
+    refresh_auto_route,
 )
 from .backend import SharedSession
 from . import autoroute
@@ -95,6 +96,17 @@ def login(agent: str = "claude"):
     raise ValueError(f"Unknown agent '{agent}'.")
 
 
+def auth(provider: str | None = None) -> None:
+    """Authenticate with the specified provider (defaults to claude/pi)."""
+    provider = provider or "claude"
+    if provider.lower() in {"claude", "anthropic", "pi"}:
+        return login_claude()
+    elif provider.lower() == "codex":
+        return _codex_auth(provider)
+    else:
+        raise ValueError(f"Unknown provider '{provider}'. Supported: claude, codex")
+
+
 _AUTO_INITIALIZED = False
 
 
@@ -115,6 +127,11 @@ def _auto_register_magic() -> None:
                 register_magic(name="claude", agent="claude", ipython=ip)
             except Exception as exc:
                 print(f"Skipping Claude auto-setup: {exc}")
+            # Register all agents from settings (including gemini)
+            try:
+                refresh_auto_route(ipython=ip)
+            except Exception as exc:
+                print(f"Failed to refresh auto-route: {exc}")
             _AUTO_INITIALIZED = True
     except Exception:
         pass

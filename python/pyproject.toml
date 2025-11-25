@@ -25,3 +25,8 @@ include = [
     "src/cleon/bin/*",
     "src/cleon/images/*",
 ]
+
+[dependency-groups]
+dev = [
+    "types-pygments>=2.19.0.20251121",
+]
