@@ -1,38 +1,80 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the cleon Python wheel locally with maturin.
-# This mirrors the CI release step: builds from python/cleon/Cargo.toml into ./dist.
+# Build both cleon wheel and extension wheel for local testing
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST="$ROOT/python/cleon/Cargo.toml"
 DIST_DIR="$ROOT/dist"
 
-if [[ ! -f "$MANIFEST" ]]; then
-  echo "error: manifest not found at $MANIFEST" >&2
-  exit 1
-fi
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║            Building cleon packages for testing             ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "error: uv is required (pip install uv or https://github.com/astral-sh/uv)" >&2
-  exit 1
-fi
+# Clean dist directory
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
 
-cd "$ROOT"
+# 1. Build cleon wheel
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📦 Building cleon wheel..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Ensure a clean, dedicated venv for the build
-uv venv --allow-existing
-
-# Install maturin
-uv pip install maturin
-
-# Build and stage CLI binary for bundling
+# Stage CLI binary
 "$ROOT/scripts/stage_cli.sh"
 
-# Build the wheel
-uv run -- maturin build --release --manifest-path "$MANIFEST" --out "$DIST_DIR"
+# Build wheel using maturin (prefer uvx, fall back to direct command)
+cd "$ROOT"
+if command -v uvx &> /dev/null; then
+    uvx maturin build --release --out "$DIST_DIR" --manifest-path python/cleon/Cargo.toml
+elif command -v maturin &> /dev/null; then
+    maturin build --release --out "$DIST_DIR" --manifest-path python/cleon/Cargo.toml
+else
+    echo "❌ maturin not found. Install with: pip install maturin (or use uvx)"
+    exit 1
+fi
 
-# Build sdist too (helpful for release parity)
-uv run -- maturin sdist --manifest-path "$MANIFEST" --out "$DIST_DIR"
+CLEON_WHEEL=$(ls "$DIST_DIR"/cleon-*.whl 2>/dev/null | head -1)
+echo "✅ Built: $CLEON_WHEEL"
+echo ""
 
-echo "✅ Wheel(s) and sdist written to $DIST_DIR"
+# 2. Build extension wheel
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📦 Building cleon-jupyter-extension wheel..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+cd "$ROOT/extension"
+
+# Install npm dependencies if needed
+if [ ! -d "node_modules" ]; then
+    echo "Installing npm dependencies..."
+    npm install
+fi
+
+# Build TypeScript
+echo "Building TypeScript..."
+npm run build:lib:prod
+
+# Build JupyterLab extension
+echo "Building JupyterLab extension..."
+python -m jupyter labextension build .
+
+# Build Python wheel
+echo "Building Python wheel..."
+python -m build --outdir "$DIST_DIR"
+
+EXT_WHEEL=$(ls "$DIST_DIR"/cleon_jupyter_extension-*.whl 2>/dev/null | head -1)
+echo "✅ Built: $EXT_WHEEL"
+echo ""
+
+# Summary
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Build complete! Wheels are in: $DIST_DIR"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+ls -la "$DIST_DIR"/*.whl
+echo ""
+echo "Copy & paste to install:"
+echo ""
+echo "uv pip install -U $CLEON_WHEEL"
+echo "uv pip install -U $EXT_WHEEL"

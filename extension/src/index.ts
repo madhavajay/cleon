@@ -1,7 +1,4 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
 import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
 
@@ -69,7 +66,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     console.log('cleon-cell-control: window.cleonInsertAndRun registered');
 
     const registerCommTarget = (kernel: IKernelConnection) => {
-      kernel.registerCommTarget(COMM_TARGET, (comm, openMsg) => {
+      kernel.registerCommTarget(COMM_TARGET, (comm, _openMsg) => {
         console.log('cleon-cell-control: comm opened');
 
         comm.onMsg = (msg) => {

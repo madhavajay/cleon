@@ -189,6 +189,7 @@ def use(
     auto: bool = True,
     session_id: str | None = None,
     ipython=None,
+    quiet: bool = False,
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell."""
 
@@ -214,6 +215,7 @@ def use(
         auto=auto,
         session_id=session_id,
         ipython=ipython,
+        quiet=quiet,
     )
     return None  # type: ignore[return-value]
 
@@ -680,6 +682,7 @@ def register_magic(
     auto: bool = True,
     session_id: str | None = None,
     ipython=None,
+    quiet: bool = False,
 ) -> Callable[[str, str | None], Any]:
     """Register the ``%%name`` cell magic for cleon."""
 
@@ -936,14 +939,15 @@ def register_magic(
     )
     if auto:
         _enable_auto_route(ip, normalized, backend_name, agent_prefix)
-    pretty_name = backend_name.capitalize()
-    print(f"{pretty_name} session started.")
-    if backend_name == "gemini":
-        print("Warning: Gemini support is slow.\n")
-    else:
-        print()
-    if backend_name == "codex":
-        help()
+    if not quiet:
+        pretty_name = backend_name.capitalize()
+        print(f"{pretty_name} session started.")
+        if backend_name == "gemini":
+            print("Warning: Gemini support is slow.\n")
+        else:
+            print()
+        if backend_name == "codex":
+            help()
     return None  # type: ignore[return-value]
 
 
@@ -997,7 +1001,7 @@ I am Codex!
 I'm Claude, Anthropic's AI assistant!
 
 > Whats your name?
-I'm Gemini, Google's AI assistant! (use `%%gemini`)
+I'm Gemini, Google's AI assistant!
 ```
 """
     display(Markdown(text))
@@ -1418,7 +1422,7 @@ def _queue_agent_cell(agent_query: str, magic_name: str, prefix: str) -> None:
     """Queue an agent query to run in a new cell below after current cell completes."""
     try:
         if _CELL_CONTROL_AVAILABLE:
-            from cleon_cell_control import insert_and_run  # type: ignore[import-untyped]
+            from cleon_cell_control import insert_and_run  # type: ignore[import-not-found]
 
             # Use the prefix format (e.g., "@ query") not magic format
             cell_content = f"{prefix} {agent_query}"
@@ -1671,7 +1675,12 @@ def _render_markdown_fallback(content: str) -> str:
                 f"  var btn = this;"
                 f"  setTimeout(function() {{ btn.textContent='▶'; }}, 1500);"
                 f"}} else {{"
-                f"  alert('Extension not loaded. Refresh the page.');"
+                f"  var msg = 'Extension not loaded in this session.\\n\\n';"
+                f"  msg += 'To fix:\\n';"
+                f"  msg += '1. Restart JupyterLab (Ctrl+C, then start again)\\n';"
+                f"  msg += '2. Refresh this page\\n\\n';"
+                f"  msg += 'Or run: cleon.check_extension() for more info';"
+                f"  alert(msg);"
                 f'}}" '
                 f"id='{code_id}_run' "
                 f"style='position:absolute; top:6px; right:36px; {btn_style}' "
@@ -1837,6 +1846,7 @@ class _Progress:
 
     def update_message(self, message: str, *, markdown: bool = False) -> None:
         self.last_message = message
+        rendered: HTML | Markdown
         if markdown and not self.agent:
             rendered = Markdown(message)
         else:
@@ -1853,6 +1863,7 @@ class _Progress:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
+        rendered: HTML | Markdown
         if raw_html:
             rendered = HTML(message)
         elif markdown:

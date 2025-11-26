@@ -31,7 +31,9 @@
     "clean:labextension": "rimraf cleon_cell_control/labextension",
     "watch": "run-p watch:src watch:labextension",
     "watch:src": "tsc -w --sourceMap",
-    "watch:labextension": "jupyter labextension watch ."
+    "watch:labextension": "jupyter labextension watch .",
+    "lint": "eslint src --ext .ts,.tsx",
+    "lint:fix": "eslint src --ext .ts,.tsx --fix"
   },
   "dependencies": {
     "@jupyterlab/application": "^4.0.0",
@@ -40,7 +42,13 @@
   },
   "devDependencies": {
     "@jupyterlab/builder": "^4.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.45.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-plugin-prettier": "^5.0.0",
     "npm-run-all": "^4.1.5",
+    "prettier": "^3.0.0",
     "rimraf": "^5.0.0",
     "typescript": "~5.0.0"
   },

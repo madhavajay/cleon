@@ -1,0 +1,352 @@
+name: Release All Packages to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - custom
+        default: 'patch'
+      custom_version:
+        description: 'Custom version (only if bump=custom, e.g., 0.2.0)'
+        required: false
+        type: string
+      skip_cleon:
+        description: 'Skip cleon package release'
+        required: false
+        type: boolean
+        default: false
+      skip_extension:
+        description: 'Skip extension package release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.new.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get current version
+        id: current
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${CURRENT}" >> $GITHUB_OUTPUT
+          echo "Current version: ${CURRENT}"
+
+      - name: Calculate new version
+        id: new
+        run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "${{ inputs.bump }}" in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+            custom)
+              NEW_VERSION="${{ inputs.custom_version }}"
+              ;;
+          esac
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "New version: ${NEW_VERSION}"
+
+      - name: Bump version in all files
+        run: |
+          VERSION="${{ steps.new.outputs.version }}"
+
+          # Root Cargo.toml
+          sed -i.bak "0,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" Cargo.toml && rm Cargo.toml.bak
+
+          # Python bindings Cargo.toml
+          sed -i.bak "0,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" python/cleon/Cargo.toml && rm python/cleon/Cargo.toml.bak
+
+          # pyproject.toml
+          sed -i.bak "s/^version = .*/version = \"${VERSION}\"/" python/pyproject.toml && rm python/pyproject.toml.bak
+
+          # Extension package.json
+          cd extension && npm version ${VERSION} --no-git-tag-version && cd ..
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml python/cleon/Cargo.toml python/pyproject.toml extension/package.json
+          git commit -m "Bump all packages to version ${{ steps.new.outputs.version }}"
+          git tag "v${{ steps.new.outputs.version }}"
+          git push origin main --tags
+
+  # ============================================================
+  # CLEON PACKAGE BUILD
+  # ============================================================
+  build-cleon-wheels:
+    if: ${{ !inputs.skip_cleon }}
+    needs: version-bump
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python/cleon
+
+      - name: Build and stage cleon CLI
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+        run: |
+          ./scripts/stage_cli.sh ${{ matrix.target }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: .
+          target: ${{ matrix.target }}
+          args: --release --out dist --manifest-path python/cleon/Cargo.toml
+          sccache: 'true'
+          manylinux: auto
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleon-wheels-${{ matrix.target }}
+          path: dist/*.whl
+
+  build-cleon-sdist:
+    if: ${{ !inputs.skip_cleon }}
+    needs: version-bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Build and stage cleon CLI
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: |
+          ./scripts/stage_cli.sh
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: .
+          command: sdist
+          args: --out dist --manifest-path python/cleon/Cargo.toml
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleon-sdist
+          path: dist/*.tar.gz
+
+  # ============================================================
+  # EXTENSION PACKAGE BUILD
+  # ============================================================
+  build-extension:
+    if: ${{ !inputs.skip_extension }}
+    needs: version-bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build jupyterlab>=4.0.0 hatchling hatch-jupyter-builder hatch-nodejs-version
+
+      - name: Install Node dependencies
+        working-directory: extension
+        run: npm install
+
+      - name: Build TypeScript
+        working-directory: extension
+        run: npm run build:lib:prod
+
+      - name: Build JupyterLab extension
+        working-directory: extension
+        run: python -m jupyter labextension build .
+
+      - name: Build Python package
+        working-directory: extension
+        run: python -m build
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-wheel
+          path: extension/dist/*.whl
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-sdist
+          path: extension/dist/*.tar.gz
+
+  # ============================================================
+  # PUBLISH ALL PACKAGES
+  # ============================================================
+  publish-cleon:
+    if: ${{ !inputs.skip_cleon }}
+    needs: [build-cleon-wheels, build-cleon-sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all cleon wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cleon-wheels-*
+          merge-multiple: true
+
+      - name: Download cleon sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          name: cleon-sdist
+
+      - name: List cleon artifacts
+        run: ls -la dist/
+
+      - name: Publish cleon to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-extension:
+    if: ${{ !inputs.skip_extension }}
+    needs: build-extension
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download extension wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-wheel
+          path: dist
+
+      - name: Download extension sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-sdist
+          path: dist
+
+      - name: List extension artifacts
+        run: ls -la dist/
+
+      - name: Publish extension to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  # ============================================================
+  # SUMMARY
+  # ============================================================
+  release-summary:
+    needs: [version-bump, publish-cleon, publish-extension]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release Summary
+        run: |
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║                    RELEASE SUMMARY                         ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Version: ${{ needs.version-bump.outputs.version }}"
+          echo ""
+          echo "Packages released:"
+          if [[ "${{ inputs.skip_cleon }}" != "true" ]]; then
+            echo "  ✅ cleon"
+          else
+            echo "  ⏭️  cleon (skipped)"
+          fi
+          if [[ "${{ inputs.skip_extension }}" != "true" ]]; then
+            echo "  ✅ cleon-jupyter-extension"
+          else
+            echo "  ⏭️  cleon-jupyter-extension (skipped)"
+          fi
+          echo ""
+          echo "Install with:"
+          echo "  pip install -U cleon cleon-jupyter-extension"
+          echo "  # or"
+          echo "  uv pip install -U cleon cleon-jupyter-extension"
