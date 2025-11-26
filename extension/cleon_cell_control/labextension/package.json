@@ -1,6 +1,6 @@
 {
   "name": "cleon-cell-control",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "JupyterLab extension for cell manipulation from kernel",
   "keywords": [
     "jupyter",
@@ -48,7 +48,7 @@
     "extension": true,
     "outputDir": "cleon_cell_control/labextension",
     "_build": {
-      "load": "static/remoteEntry.449afd68805695bd74dd.js",
+      "load": "static/remoteEntry.e8df8bb809c0f44e1f15.js",
       "extension": "./extension"
     }
   }

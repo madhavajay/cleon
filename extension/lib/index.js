@@ -162,4 +162,3 @@ const plugin = {
     }
 };
 export default plugin;
-//# sourceMappingURL=index.js.map

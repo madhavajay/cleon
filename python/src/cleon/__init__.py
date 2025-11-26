@@ -48,14 +48,104 @@ __all__ = [
     "SharedSession",
     "install_extension",
     "has_extension",
+    "check_extension",
 ]
 
 
-def has_extension() -> bool:
-    """Check if cleon-jupyter-extension is installed and available."""
+def has_extension(*, verbose: bool = True) -> bool:
+    """Check if cleon-jupyter-extension is installed and available.
+
+    Returns True if the extension package is installed.
+    If verbose=True (default), also displays status about whether the
+    extension is loaded and reachable in the current notebook.
+    """
     import importlib.util
 
-    return importlib.util.find_spec("cleon_cell_control") is not None
+    installed = importlib.util.find_spec("cleon_cell_control") is not None
+
+    if verbose:
+        _display_extension_status(installed)
+
+    return installed
+
+
+def _display_extension_status(installed: bool) -> None:
+    """Display styled extension status information."""
+    try:
+        from IPython.display import display, HTML
+    except ImportError:
+        # Plain text fallback
+        if installed:
+            print("✅ Extension installed")
+            print("   Run: cleon.check_extension() to test if it's loaded")
+        else:
+            print("❌ Extension not installed")
+            print("   Run: cleon.install_extension()")
+        return
+
+    if installed:
+        html = """
+<div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#90EE90; font-weight:600; margin-bottom:8px;">✅ Extension Installed</div>
+<div style="color:#d4edda; font-size:0.9em; line-height:1.5;">
+<p style="margin:0 0 8px 0;">The extension package is installed. To verify it's loaded in JupyterLab:</p>
+<div style="position:relative; background:#272822; border-radius:6px; padding:8px 50px 8px 12px; margin:8px 0;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.85em;">cleon.check_extension()</code>
+<button onclick="navigator.clipboard.writeText('cleon.check_extension()').then(() => { this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); })" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+<p style="margin:8px 0 0 0; color:#a8d8a8; font-size:0.85em;">If not loaded, restart JupyterLab and refresh the page.</p>
+</div>
+</div>"""
+    else:
+        html = """
+<div style="background:#2a1a1a; border:1px solid #5a2d2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#ff6b6b; font-weight:600; margin-bottom:8px;">❌ Extension Not Installed</div>
+<div style="color:#f5d4d4; font-size:0.9em; line-height:1.5;">
+<p style="margin:0 0 8px 0;">Install the extension to enable ▶ play buttons on code snippets:</p>
+<div style="position:relative; background:#272822; border-radius:6px; padding:8px 50px 8px 12px; margin:8px 0;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.85em;">cleon.install_extension()</code>
+<button onclick="navigator.clipboard.writeText('cleon.install_extension()').then(() => { this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); })" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+</div>
+</div>"""
+
+    display(HTML(html))
+
+
+def check_extension() -> bool:
+    """Check if the extension is loaded and reachable in the current notebook.
+
+    This tests whether window.cleonInsertAndRun is available in the browser.
+    Returns True if the extension is working, False otherwise.
+    """
+    try:
+        from IPython.display import display, HTML
+    except ImportError:
+        print("Not running in IPython/Jupyter")
+        return False
+
+    # Inject JavaScript to check and report
+    js_check = """
+<div id="cleon-ext-check" style="background:#1F1F1F; border:1px solid #3A3A3A; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#F5F5F5; font-size:0.9em;">Checking extension status...</div>
+</div>
+<script>
+(function() {
+    var container = document.getElementById('cleon-ext-check');
+    if (window.cleonInsertAndRun) {
+        container.style.background = '#1a2e1a';
+        container.style.borderColor = '#2d5a2d';
+        container.innerHTML = '<div style="color:#90EE90; font-weight:600;">✅ Extension Loaded & Working</div><div style="color:#d4edda; font-size:0.9em; margin-top:6px;">Code snippets will have ▶ play buttons to insert & run.</div>';
+    } else {
+        container.style.background = '#2a2a1a';
+        container.style.borderColor = '#5a5a2d';
+        container.innerHTML = '<div style="color:#FFD700; font-weight:600;">⚠️ Extension Not Loaded</div><div style="color:#f5f5d4; font-size:0.9em; margin-top:6px; line-height:1.5;"><p style="margin:0 0 6px 0;">The extension is installed but not loaded in this session.</p><p style="margin:0;"><strong>Fix:</strong> Restart JupyterLab, then refresh this page.</p></div>';
+    }
+})();
+</script>
+"""
+    display(HTML(js_check))
+    return has_extension(verbose=False)
 
 
 def install_extension() -> None:
@@ -71,35 +161,128 @@ def install_extension() -> None:
     import subprocess
     import sys
 
+    try:
+        from IPython.display import display, HTML
+
+        use_html = True
+    except ImportError:
+        use_html = False
+
     # Check if we're in dev mode
     if os.environ.get("CLEON_DEV_MODE"):
-        print("⚠️  Dev mode detected (CLEON_DEV_MODE is set)")
-        print("   Extension should be installed via: ./jupyter.sh")
+        msg = "⚠️  Dev mode detected. Extension should be installed via: ./jupyter.sh"
+        if use_html:
+            display(
+                HTML(f"""
+<div style="background:#2a2a1a; border:1px solid #5a5a2d; border-radius:8px; padding:12px 16px; margin:8px 0;">
+<div style="color:#FFD700;">{msg}</div>
+</div>""")
+            )
+        else:
+            print(msg)
         return
 
     # Check if already installed
-    if has_extension():
-        print("✅ cleon-jupyter-extension is already installed!")
-        print("   If JupyterLab doesn't show the extension, restart JupyterLab.")
+    if has_extension(verbose=False):
+        if use_html:
+            display(
+                HTML("""
+<div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#90EE90; font-weight:600; margin-bottom:8px;">✅ Already Installed</div>
+<div style="color:#d4edda; font-size:0.9em; line-height:1.5;">
+<p style="margin:0 0 8px 0;">The extension is already installed. Check if it's loaded:</p>
+<div style="position:relative; background:#272822; border-radius:6px; padding:8px 50px 8px 12px; margin:8px 0;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.85em;">cleon.check_extension()</code>
+<button onclick="navigator.clipboard.writeText('cleon.check_extension()').then(() => { this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); })" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+<p style="margin:8px 0 0 0; color:#a8d8a8; font-size:0.85em;">If not working, restart JupyterLab and refresh the page.</p>
+</div>
+</div>""")
+            )
+        else:
+            print("✅ cleon-jupyter-extension is already installed!")
+            print("   Run cleon.check_extension() to verify it's loaded.")
         return
 
-    print("📦 Installing cleon-jupyter-extension...")
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "cleon-jupyter-extension"]
+    # Determine install command based on environment
+    use_uv = _is_uv_environment()
+
+    if use_uv:
+        cmd = ["uv", "pip", "install", "-U", "cleon-jupyter-extension"]
+        cmd_str = "uv pip install -U cleon-jupyter-extension"
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "cleon-jupyter-extension"]
+        cmd_str = "pip install -U cleon-jupyter-extension"
+
+    if use_html:
+        display(
+            HTML(f"""
+<div style="background:#1F1F1F; border:1px solid #3A3A3A; border-radius:8px; padding:12px 16px; margin:8px 0;">
+<div style="color:#F5F5F5;">📦 Installing cleon-jupyter-extension...</div>
+<div style="color:#888; font-size:0.85em; margin-top:4px;">Command: {cmd_str}</div>
+</div>""")
         )
-        print("")
-        print("✅ Installation complete!")
-        print("")
-        print("⚠️  IMPORTANT: You must restart JupyterLab for the extension to load.")
-        print("   1. Save your work")
-        print("   2. Stop JupyterLab (Ctrl+C in terminal)")
-        print("   3. Start JupyterLab again")
-        print("")
-        print("After restart, code snippets will have a ▶ button to insert & run.")
+    else:
+        print("📦 Installing cleon-jupyter-extension...")
+        print(f"   Command: {cmd_str}")
+
+    try:
+        subprocess.check_call(cmd)
+
+        if use_html:
+            display(
+                HTML("""
+<div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#90EE90; font-weight:600; margin-bottom:10px;">✅ Installation Complete!</div>
+<div style="color:#d4edda; font-size:0.9em; line-height:1.6;">
+<div style="background:#2d5a2d; border-radius:6px; padding:10px 12px; margin-bottom:10px;">
+<div style="color:#FFD700; font-weight:600; margin-bottom:6px;">⚠️ RESTART REQUIRED</div>
+<div style="color:#d4edda;">
+<strong>1.</strong> Save your work<br/>
+<strong>2.</strong> Stop JupyterLab (Ctrl+C in terminal)<br/>
+<strong>3.</strong> Start JupyterLab again
+</div>
+</div>
+<p style="margin:8px 0;">After restart, verify it's working:</p>
+<div style="position:relative; background:#272822; border-radius:6px; padding:8px 50px 8px 12px; margin:8px 0;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.85em;">cleon.check_extension()</code>
+<button onclick="navigator.clipboard.writeText('cleon.check_extension()').then(() => { this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); })" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+</div>
+</div>""")
+            )
+        else:
+            print("\n✅ Installation complete!")
+            print("\n⚠️  RESTART REQUIRED:")
+            print("   1. Save your work")
+            print("   2. Stop JupyterLab (Ctrl+C in terminal)")
+            print("   3. Start JupyterLab again")
+            print("\nAfter restart, run: cleon.check_extension()")
+
     except subprocess.CalledProcessError as e:
-        print(f"❌ Installation failed: {e}")
-        print("   Try manually: pip install cleon-jupyter-extension")
+        fallback_cmd = (
+            "uv pip install -U cleon-jupyter-extension"
+            if use_uv
+            else "pip install -U cleon-jupyter-extension"
+        )
+        if use_html:
+            display(
+                HTML(f"""
+<div style="background:#2a1a1a; border:1px solid #5a2d2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#ff6b6b; font-weight:600; margin-bottom:8px;">❌ Installation Failed</div>
+<div style="color:#f5d4d4; font-size:0.9em; line-height:1.5;">
+<p style="margin:0 0 8px 0;">Error: {e}</p>
+<p style="margin:0 0 8px 0;">Try manually in your terminal:</p>
+<div style="position:relative; background:#272822; border-radius:6px; padding:8px 50px 8px 12px; margin:8px 0;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.85em;">{fallback_cmd}</code>
+<button onclick="navigator.clipboard.writeText('{fallback_cmd}').then(() => {{ this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); }})" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+</div>
+</div>""")
+            )
+        else:
+            print(f"❌ Installation failed: {e}")
+            print(f"   Try manually: {fallback_cmd}")
 
 
 # Expose help() at top-level for convenience
@@ -276,6 +459,61 @@ def _check_for_updates() -> None:
     thread.start()
 
 
+def _display_welcome_message() -> None:
+    """Display styled welcome message with agent prefixes and extension hint."""
+    try:
+        from IPython.display import display, HTML
+    except ImportError:
+        # Plain text fallback
+        print("Cleon session started.\n")
+        print("Pick an agent with a prefix:\n")
+        print("@ Whats your name?")
+        print("I am Codex!\n")
+        print("~ Whats your name?")
+        print("I'm Claude, Anthropic's AI assistant!\n")
+        print("> Whats your name?")
+        print("I'm Gemini, Google's AI assistant!")
+        return
+
+    ext_installed = has_extension(verbose=False)
+
+    # Extension status section
+    if ext_installed:
+        ext_html = """
+<div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:6px; padding:10px 12px; margin-top:12px;">
+<div style="color:#90EE90; font-size:0.85em;">✅ Extension installed — code snippets have ▶ play buttons</div>
+</div>"""
+    else:
+        ext_html = """
+<div style="background:#262624; border:1px solid #4A4A45; border-radius:6px; padding:10px 12px; margin-top:12px;">
+<div style="color:#F7F5F2; font-size:0.85em; margin-bottom:6px;">💡 <strong>Enable ▶ play buttons on code snippets:</strong></div>
+<div style="position:relative; background:#1a1a18; border-radius:4px; padding:6px 50px 6px 10px; margin-top:6px;">
+<code style="color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.8em;">cleon.install_extension()</code>
+<button onclick="navigator.clipboard.writeText('cleon.install_extension()').then(() => { this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); })" style="position:absolute; right:4px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:3px; padding:3px 6px; cursor:pointer; color:#f8f8f2; font-size:11px; opacity:0.7;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'" title="Copy">📋</button>
+</div>
+</div>"""
+
+    html = f"""
+<div style="background:#1F1F1F; border:1px solid #3A3A3A; border-radius:10px; padding:14px 18px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
+<div style="color:#F5F5F5; font-weight:600; font-size:1em; margin-bottom:10px;">Cleon session started.</div>
+
+<div style="color:#aaa; font-size:0.85em; margin-bottom:8px;">Pick an agent with a prefix:</div>
+
+<div style="background:#272822; border-radius:6px; padding:10px 14px; margin-bottom:4px; font-family:'Fira Code',monospace; font-size:0.85em; line-height:1.6;">
+<div><span style="color:#66d9ef;">@</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
+<div style="color:#a6e22e; margin-left:12px;">I am Codex!</div>
+<div style="margin-top:8px;"><span style="color:#f92672;">~</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
+<div style="color:#fd971f; margin-left:12px;">I'm Claude, Anthropic's AI assistant!</div>
+<div style="margin-top:8px;"><span style="color:#ae81ff;">&gt;</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
+<div style="color:#e6db74; margin-left:12px;">I'm Gemini, Google's AI assistant!</div>
+</div>
+
+{ext_html}
+</div>
+"""
+    display(HTML(html))
+
+
 def _auto_register_magic() -> None:
     global _AUTO_INITIALIZED, _EXTENSION_HINT_SHOWN
     if _AUTO_INITIALIZED:
@@ -287,11 +525,11 @@ def _auto_register_magic() -> None:
         ip = get_ipython()
         if ip is not None:
             try:
-                use(ipython=ip)
+                use(ipython=ip, quiet=True)
             except Exception as exc:
                 print(f"Failed to initialize Codex magic: {exc}")
             try:
-                register_magic(name="claude", agent="claude", ipython=ip)
+                register_magic(name="claude", agent="claude", ipython=ip, quiet=True)
             except Exception as exc:
                 print(f"Skipping Claude auto-setup: {exc}")
             # Register all agents from settings (including gemini)
@@ -300,11 +538,9 @@ def _auto_register_magic() -> None:
             except Exception as exc:
                 print(f"Failed to refresh auto-route: {exc}")
 
-            # Show extension hint once (unless in dev mode)
+            # Show styled welcome message (unless in dev mode)
             if not _EXTENSION_HINT_SHOWN and not os.environ.get("CLEON_DEV_MODE"):
-                if not has_extension():
-                    print("💡 Tip: Run cleon.install_extension() for advanced features")
-                    print("   (insert & run code snippets directly into cells)")
+                _display_welcome_message()
                 _EXTENSION_HINT_SHOWN = True
 
             # Check for updates (10% of the time, in background)

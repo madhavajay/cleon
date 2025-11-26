@@ -33,7 +33,11 @@ artifacts = ["cleon_cell_control/labextension"]
 exclude = [".github", "binder"]
 
 [tool.hatch.build.targets.wheel]
+packages = ["cleon_cell_control"]
 artifacts = ["cleon_cell_control/labextension"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"cleon_cell_control/labextension" = "share/jupyter/labextensions/cleon-cell-control"
 
 [tool.hatch.build.hooks.version]
 path = "cleon_cell_control/_version.py"
