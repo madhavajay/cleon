@@ -1,6 +1,6 @@
 import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
-import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
+import { INotebookTracker, NotebookActions, NotebookPanel } from '@jupyterlab/notebook';
 
 import { IKernelConnection } from '@jupyterlab/services/lib/kernel/kernel';
 
@@ -18,6 +18,9 @@ declare global {
     cleonInsertAndRun?: (code: string) => void;
   }
 }
+
+// Track the last cell inserted via play button per notebook so we can append sequentially
+const lastInsertedIndex = new WeakMap<NotebookPanel, number>();
 
 const plugin: JupyterFrontEndPlugin<void> = {
   id: 'cleon-cell-control:plugin',
@@ -41,9 +44,11 @@ const plugin: JupyterFrontEndPlugin<void> = {
         return;
       }
 
-      const activeCellIndex = notebook.content.activeCellIndex;
       const sharedModel = notebookModel.sharedModel;
-      const newCellIndex = activeCellIndex + 1;
+      const previousIndex = lastInsertedIndex.get(notebook);
+      const fallbackIndex = notebook.content.activeCellIndex + 1;
+      const targetIndex = typeof previousIndex === 'number' ? previousIndex + 1 : fallbackIndex;
+      const newCellIndex = Math.min(targetIndex, notebookModel.cells.length);
 
       sharedModel.insertCell(newCellIndex, {
         cell_type: 'code',
@@ -51,6 +56,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
       });
 
       notebook.content.activeCellIndex = newCellIndex;
+      lastInsertedIndex.set(notebook, newCellIndex);
 
       // Execute the newly inserted cell
       setTimeout(async () => {

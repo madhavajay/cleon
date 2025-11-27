@@ -12,6 +12,7 @@ import queue
 import re
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +103,10 @@ _ASYNC_IDLE = threading.Event()
 _ASYNC_IDLE.set()
 _AGENT_HISTORY_LOCK = threading.Lock()
 _CONTEXT_LOCK = threading.Lock()
+_CELL_OUTPUTS: dict[int, str] = {}
+_CELL_OUTPUT_LOCK = threading.Lock()
+_CELL_OUTPUT_LIMIT = 200
+_OUTPUT_CAPTURE_INSTALLED = False
 
 if _LOG_PATH:
     try:
@@ -1338,16 +1343,22 @@ def _line_has_agent_prefix(line: str, prefixes: dict) -> tuple[str, str, str] | 
         # @ query       -> ("# @", "@", "codex")
         ~ query         -> ("~", "~", "claude")
         # ~ query       -> ("# ~", "~", "claude")
+        @codex query    -> ("@codex", "@", "codex")
+        ~claude query   -> ("~claude", "~", "claude")
     """
     stripped = line.lstrip()
-    for prefix, (_, magic_name) in prefixes.items():
-        # Direct prefix match
-        if stripped.startswith(prefix):
-            return prefix, prefix, magic_name
-        # Commented prefix match: "# @" or "# ~" etc (strict: must be "# " + prefix)
-        commented_prefix = f"# {prefix}"
-        if stripped.startswith(commented_prefix):
-            return commented_prefix, prefix, magic_name
+    for prefix, (agent_name, magic_name) in prefixes.items():
+        candidates = [prefix]
+        if agent_name:
+            candidates.append(f"{prefix}{agent_name}")
+
+        for cand in candidates:
+            if stripped.startswith(cand):
+                return cand, prefix, magic_name
+            # Commented prefix match: "# @" or "# @codex" etc
+            commented_prefix = f"# {cand}"
+            if stripped.startswith(commented_prefix):
+                return commented_prefix, prefix, magic_name
     return None
 
 
@@ -1371,6 +1382,9 @@ def _detect_mixed_cell(raw_cell: str) -> tuple[str, str, str, str] | None:
 
     lines = raw_cell.splitlines()
 
+    # Track whether we're inside a triple-quoted string to avoid routing doctest/docstring lines
+    in_block_string = False
+
     # Find the first line that starts with an agent prefix
     split_idx = None
     matched_prefix = None
@@ -1378,6 +1392,23 @@ def _detect_mixed_cell(raw_cell: str) -> tuple[str, str, str, str] | None:
     matched_magic = None
 
     for i, line in enumerate(lines):
+        stripped_line = line.strip()
+
+        # Toggle triple-quoted string context
+        quote_hits = stripped_line.count('"""') + stripped_line.count("'''")
+        if quote_hits % 2 == 1:
+            in_block_string = not in_block_string
+            if in_block_string:
+                # If this line starts the string, skip it and continue
+                continue
+
+        if in_block_string:
+            continue
+
+        # Skip doctest style prompts to avoid false routing (e.g., ">>> func()")
+        if stripped_line.startswith((">>>", "...")):
+            continue
+
         match = _line_has_agent_prefix(line, _AUTO_ROUTE_RULES)
         if match:
             m_prefix, a_prefix, magic_name = match
@@ -1422,7 +1453,7 @@ def _queue_agent_cell(agent_query: str, magic_name: str, prefix: str) -> None:
     """Queue an agent query to run in a new cell below after current cell completes."""
     try:
         if _CELL_CONTROL_AVAILABLE:
-            from cleon_cell_control import insert_and_run  # type: ignore[import-not-found]
+            from cleon_cell_control import insert_and_run  # type: ignore[import-not-found,import-untyped]
 
             # Use the prefix format (e.g., "@ query") not magic format
             cell_content = f"{prefix} {agent_query}"
@@ -1453,21 +1484,26 @@ def _detect_auto_route_target(raw_cell: str) -> tuple[str, str] | None:
     text = raw_cell.lstrip()
     if not text or text.startswith(("%%", "%", "!", "?")):
         return None
-    for prefix, (_, magic_name) in _AUTO_ROUTE_RULES.items():
-        if _cell_has_prefix(raw_cell, prefix):
+    for prefix, (agent_name, magic_name) in _AUTO_ROUTE_RULES.items():
+        if _cell_has_prefix(raw_cell, prefix, agent_name):
             prompt_text = _strip_prompt_prefix(raw_cell, prefix)
             return magic_name, prompt_text
     return None
 
 
-def _cell_has_prefix(raw_cell: str, prefix: str) -> bool:
+def _cell_has_prefix(raw_cell: str, prefix: str, agent_name: str | None = None) -> bool:
     """Check if cell starts with prefix (only first non-empty line needs prefix)."""
     lines = raw_cell.splitlines()
     non_empty = [ln for ln in lines if ln.strip()]
     if not non_empty:
         return False
     # Only check the first non-empty line for the prefix
-    return non_empty[0].lstrip().startswith(prefix)
+    candidate = non_empty[0].lstrip()
+    if candidate.startswith(prefix):
+        return True
+    if agent_name and candidate.startswith(f"{prefix}{agent_name}"):
+        return True
+    return False
 
 
 def _strip_prompt_prefix(text: str, prefix: str) -> str:
@@ -2374,6 +2410,93 @@ def _session_alive(agent: str | None = None) -> bool:
     return backend.session_alive()
 
 
+def _safe_to_text(value: Any) -> str:
+    """Best-effort conversion of objects to text for logging/context."""
+
+    try:
+        return str(value)
+    except Exception:
+        try:
+            return repr(value)
+        except Exception:
+            return "<unprintable output>"
+
+
+def _format_error(err: Any) -> str:
+    if err is None:
+        return ""
+    # IPython may provide (etype, evalue, tb) tuples or actual exceptions
+    if isinstance(err, tuple) and len(err) == 3:
+        etype, evalue, tb = err
+        try:
+            return "".join(traceback.format_exception(etype, evalue, tb)).strip()
+        except Exception:
+            return _safe_to_text(err)
+    if isinstance(err, BaseException):
+        try:
+            return "".join(
+                traceback.format_exception(type(err), err, err.__traceback__)
+            ).strip()
+        except Exception:
+            return _safe_to_text(err)
+    return _safe_to_text(err)
+
+
+def _store_cell_output(execution_count: int, text: str) -> None:
+    if not text:
+        return
+    with _CELL_OUTPUT_LOCK:
+        _CELL_OUTPUTS[execution_count] = text
+        if len(_CELL_OUTPUTS) > _CELL_OUTPUT_LIMIT:
+            # Keep the most recent outputs only
+            excess = len(_CELL_OUTPUTS) - _CELL_OUTPUT_LIMIT
+            for key in sorted(_CELL_OUTPUTS.keys())[:excess]:
+                _CELL_OUTPUTS.pop(key, None)
+
+
+def _capture_cell_result(result: Any) -> None:
+    """Capture exceptions from executed cells so agents see errors in context."""
+
+    try:
+        exec_count = getattr(result, "execution_count", None)
+        if exec_count is None:
+            return
+        # Prefer a pre-rendered traceback if IPython provides one
+        tb_raw = getattr(result, "error_traceback", None)
+        if tb_raw:
+            tb_text = _safe_to_text(tb_raw)
+            if tb_text:
+                _store_cell_output(exec_count, tb_text)
+                return
+
+        err = getattr(result, "error_in_exec", None) or getattr(
+            result, "error_before_exec", None
+        )
+        if err:
+            formatted = _format_error(err)
+            _store_cell_output(exec_count, formatted)
+    except Exception:
+        # Never let telemetry interfere with user code execution
+        pass
+
+
+def _install_output_capture() -> None:
+    """Hook into IPython events to remember cell outputs/errors."""
+
+    global _OUTPUT_CAPTURE_INSTALLED
+    if _OUTPUT_CAPTURE_INSTALLED:
+        return
+    ip = get_ipython()
+    if ip is None:
+        return
+    try:
+        ip.events.register("post_run_cell", _capture_cell_result)
+        _OUTPUT_CAPTURE_INSTALLED = True
+    except Exception:
+        # Best-effort: some frontends may not expose events
+        pass
+
+
 class ContextTracker:
     def __init__(self) -> None:
         self.last_seen_map: dict[str, int] = {}
@@ -2430,15 +2553,20 @@ class ContextTracker:
                 else text[:max_chars] + "\n... [truncated]"
             )
             out_obj = outputs.get(idx) if isinstance(outputs, dict) else None
-            out_text = ""
+            output_parts = []
             if out_obj is not None:
-                try:
-                    out_text = str(out_obj)
-                except Exception:
-                    out_text = repr(out_obj)
-                if max_chars is not None and len(out_text) > max_chars:
-                    out_text = out_text[:max_chars] + "\n... [truncated]"
-            cells.append((idx, code_block, out_text))
+                output_parts.append(_safe_to_text(out_obj))
+
+            with _CELL_OUTPUT_LOCK:
+                captured_output = _CELL_OUTPUTS.get(idx, "")
+            if captured_output:
+                output_parts.append(captured_output)
+
+            combined_output = "\n".join(part for part in output_parts if part)
+            if max_chars is not None and len(combined_output) > max_chars:
+                combined_output = combined_output[:max_chars] + "\n... [truncated]"
+
+            cells.append((idx, code_block, combined_output))
 
         # Apply max_cells limit if in incremental mode
         if max_cells is not None and max_cells > 0:
@@ -2475,6 +2603,7 @@ class ContextTracker:
 
 def _configure_context() -> None:
     global _CONTEXT_TRACKER
+    _install_output_capture()
     if _CONTEXT_TRACKER is None:
         _CONTEXT_TRACKER = ContextTracker()
         # Start tracking from current history position (ignore cells before cleon.use())

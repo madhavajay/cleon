@@ -23,7 +23,35 @@ Bring your own tokens via Codex, Claude or Gemini subscriptions or standard toke
 `> hi gemini` <- currently slow  
 
 ## Installation
-`pip install cleon`  
+
+### Default (extension included, no Jupyter)
+`pip install cleon`
+
+This installs the Python magics and backend plus the prebuilt Cleon extension package, but does not pull in JupyterLab itself (so it won’t reinstall Jupyter if you already have it).
+
+Launch with the bundled helper (creates/uses `~/.cache/cleon/jupyter-env`):
+
+```
+cleon jupyter lab
+```
+
+You can also run `cleon jupyter notebook` if you prefer the classic UI.
+
+The launcher will install JupyterLab + the Cleon extension into its managed env if they’re missing. If you install the Cleon Jupyter extension while Jupyter is running, restart Jupyter (and refresh the browser) so the extension loads.
+
+### Full install into your current env
+`pip install "cleon[jupyter]"`
+
+This pulls in JupyterLab 4+ and the prebuilt Cleon extension into your active environment.
+
+### Minimal install
+Need to skip Jupyter/extension? Install without deps and add only what you want:
+
+```
+pip install --no-deps cleon
+```
+
+There is a placeholder extra `cleon[no-jupyter]`, but it’s a no-op; use `--no-deps` for a truly lean install.
 
 ![Cleon install](img/install.jpg)  
 
