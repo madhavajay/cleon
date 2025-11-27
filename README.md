@@ -5,25 +5,43 @@
 
 # Cleon
 
-<img src="https://raw.githubusercontent.com/madhavajay/cleon/main/img/cleon.png" alt="Cleon logo" style="max-height:300px;">
+<img src="img/cleon.jpg" alt="Cleon logo" style="max-height:300px;">
 
-Cleon is a python library for jupyter which wraps AI session based agents like Codex, Claude and Gemini.
+Cleon brings the magic of LLM Agents to Jupyter notebooks.
+Have interactive conversations about your notebook and even have agents augment and run cells using the Jupyter extension.
+
+Bring your own tokens via Codex, Claude or Gemini subscriptions or standard token apis.
 
 ## Features
-- low friction usage with configurable prefixes that trigger prompts in code cells:
-`@ hi codex`
-`~ hi claude`
-`> hi gemini` <- coming soon
+- invocation is as low friction as typing a single configurable prefix in a code cell
+- run code at the same time while waiting for agents to respond
+- queue agent prompts and approve actions just like cli agents
+
+## Default Prefixes
+`@ hi codex`  
+`~ hi claude`  
+`> hi gemini` <- currently slow  
 
 ## Installation
-`pip install cleon`
+`pip install cleon`  
+
+![Cleon install](img/install.jpg)  
+
+
+## Usage
+![Cleon in use](img/use.jpg) 
+
 
 ## Codex
-- Make sure your codex is already authed.
+- Make sure your codex is already authed, or copy your `~/.codex/auth.json` from another machine.
 
 ## Claude Code
-- Install Claude Code
-- Run `cleon.login()`
+- Install `npm install -g @mariozechner/pi-coding-agent`  
+- Run `cleon.login()`  
+- Complete auth token flow
+
+## Sessions
+- Currently supports `codex` sessions, try `cleon.stop()` and `cleon.resume()`
 
 ## Options
 - cleon.status()
@@ -32,3 +50,7 @@ Cleon is a python library for jupyter which wraps AI session based agents like C
 - cleon.stop()
 - cleon.mode("learn")
 - cleon.mode("do")
+
+## Bugs or Feedback
+- Twitter/X: [x.com/madhavajay](https://x.com/madhavajay)
+- Blog: [madhavajay.com](https://madhavajay.com)
