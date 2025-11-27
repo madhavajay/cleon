@@ -1,5 +1,7 @@
 import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
 const COMM_TARGET = 'cleon_cell_control';
+// Track the last cell inserted via play button per notebook so we can append sequentially
+const lastInsertedIndex = new WeakMap();
 const plugin = {
     id: 'cleon-cell-control:plugin',
     description: 'JupyterLab extension for cell manipulation from kernel',
@@ -19,14 +21,17 @@ const plugin = {
                 console.error('cleon-cell-control: No notebook model');
                 return;
             }
-            const activeCellIndex = notebook.content.activeCellIndex;
             const sharedModel = notebookModel.sharedModel;
-            const newCellIndex = activeCellIndex + 1;
+            const previousIndex = lastInsertedIndex.get(notebook);
+            const fallbackIndex = notebook.content.activeCellIndex + 1;
+            const targetIndex = typeof previousIndex === 'number' ? previousIndex + 1 : fallbackIndex;
+            const newCellIndex = Math.min(targetIndex, notebookModel.cells.length);
             sharedModel.insertCell(newCellIndex, {
                 cell_type: 'code',
                 source: code
             });
             notebook.content.activeCellIndex = newCellIndex;
+            lastInsertedIndex.set(notebook, newCellIndex);
             // Execute the newly inserted cell
             setTimeout(async () => {
                 try {
@@ -40,7 +45,7 @@ const plugin = {
         };
         console.log('cleon-cell-control: window.cleonInsertAndRun registered');
         const registerCommTarget = (kernel) => {
-            kernel.registerCommTarget(COMM_TARGET, (comm, openMsg) => {
+            kernel.registerCommTarget(COMM_TARGET, (comm, _openMsg) => {
                 console.log('cleon-cell-control: comm opened');
                 comm.onMsg = (msg) => {
                     const data = msg.content.data;

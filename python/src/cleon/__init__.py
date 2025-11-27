@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import os
+
 from ._cleon import auth as _codex_auth, run  # type: ignore[import-not-found]  # Re-export PyO3 bindings
 from .magic import (
     load_ipython_extension,
@@ -59,14 +62,21 @@ def has_extension(*, verbose: bool = True) -> bool:
     If verbose=True (default), also displays status about whether the
     extension is loaded and reachable in the current notebook.
     """
-    import importlib.util
-
     installed = importlib.util.find_spec("cleon_cell_control") is not None
 
     if verbose:
         _display_extension_status(installed)
 
     return installed
+
+
+def _is_vscode_notebook() -> bool:
+    env = os.environ
+    return bool(
+        env.get("VSCODE_PID")
+        or env.get("VSCODE_CWD")
+        or env.get("TERM_PROGRAM") == "vscode"
+    )
 
 
 def _display_extension_status(installed: bool) -> None:
@@ -83,7 +93,16 @@ def _display_extension_status(installed: bool) -> None:
             print("   Run: cleon.install_extension()")
         return
 
-    if installed:
+    if _is_vscode_notebook():
+        html = """
+<div style="background:#2a2a1a; border:1px solid #5a2d2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
+<div style="color:#FFD700; font-weight:600; margin-bottom:8px;">⚠️ VS Code notebooks detected</div>
+<div style="color:#f5d4d4; font-size:0.9em; line-height:1.5;">
+<p style="margin:0 0 8px 0;">VS Code’s notebook UI does not load JupyterLab extensions, so Cleon’s interactive buttons are unavailable here.</p>
+<p style="margin:0 0 4px 0;">Use <code>cleon jupyter lab</code> in a browser for the full UI, or keep using the Python magics in VS Code.</p>
+</div>
+</div>"""
+    elif installed:
         html = """
 <div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;">
 <div style="color:#90EE90; font-weight:600; margin-bottom:8px;">✅ Extension Installed</div>
@@ -122,6 +141,21 @@ def check_extension() -> bool:
         from IPython.display import display, HTML
     except ImportError:
         print("Not running in IPython/Jupyter")
+        return False
+
+    if _is_vscode_notebook():
+        display(
+            HTML(
+                """
+<div style=\"background:#2a2a1a; border:1px solid #5a5a2d; border-radius:8px; padding:12px 16px; margin:8px 0; font-family:system-ui,-apple-system,sans-serif;\">
+<div style=\"color:#FFD700; font-weight:600; margin-bottom:8px;\">⚠️ VS Code notebooks do not load JupyterLab extensions</div>
+<div style=\"color:#f5d4d4; font-size:0.9em; line-height:1.5;\">
+<p style=\"margin:0 0 8px 0;\">The Cleon extension UI is unavailable in VS Code. Use <code>cleon jupyter lab</code> in a browser for buttons/controls, or continue using the Python magics here.</p>
+</div>
+</div>
+"""
+            )
+        )
         return False
 
     # Inject JavaScript to check and report
@@ -446,9 +480,7 @@ def _check_for_updates() -> None:
             if _parse_version(latest) > _parse_version(current):
                 use_uv = _is_uv_environment()
                 cmd = "uv pip install -U cleon" if use_uv else "pip install -U cleon"
-
-                print(f"\n📦 New cleon version available: {current} → {latest}")
-                print(f"   Upgrade: {cmd}\n")
+                _render_upgrade_notice(current, latest, cmd, use_uv)
 
         except Exception:
             # Silently fail - version check is non-critical
@@ -457,6 +489,65 @@ def _check_for_updates() -> None:
     # Run in background thread to not block import
     thread = threading.Thread(target=_do_check, daemon=True)
     thread.start()
+
+
+def _render_upgrade_notice(current: str, latest: str, cmd: str, use_uv: bool) -> None:
+    """Display upgrade message with copy/run helpers (best-effort)."""
+
+    # Try rich HTML first
+    try:
+        from IPython.display import display, HTML
+
+        ext_installed = has_extension(verbose=False)
+        in_vscode = _is_vscode_notebook()
+        cmd_html = cmd.replace('"', '\\"')
+        run_btn = ""
+        if ext_installed and not in_vscode:
+            run_btn = f"""
+<button onclick=\"(function(btn) {{
+  const cmd = '{cmd_html}';
+  if (window.cleonInsertAndRun) {{
+    window.cleonInsertAndRun('!'+cmd);
+    btn.textContent = '✓ running';
+    setTimeout(() => btn.textContent = '▶ Run upgrade', 2000);
+  }} else {{
+    navigator.clipboard.writeText(cmd).then(() => {{
+      btn.textContent = '✓ copied';
+      setTimeout(() => btn.textContent = '▶ Run upgrade', 1500);
+    }});
+  }}
+}})(this)\" style=\"margin-left:8px; background:#2d5a2d; color:#f5f5f5; border:none; border-radius:4px; padding:6px 10px; cursor:pointer;\">▶ Run upgrade</button>
+"""
+        copy_btn = f"""
+<button onclick=\"navigator.clipboard.writeText('{cmd_html}').then(() => {{ this.textContent='✓'; setTimeout(() => this.textContent='📋', 1500); }});\" style=\"position:absolute; right:6px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.1); border:none; border-radius:4px; padding:4px 8px; cursor:pointer; color:#f8f8f2; font-size:12px; opacity:0.8;\" onmouseover=\"this.style.opacity='1'\" onmouseout=\"this.style.opacity='0.8'\" title=\"Copy\">📋</button>
+"""
+
+        display(
+            HTML(
+                f"""
+<div style="background:#1F1F1F; border:1px solid #3A3A3A; border-radius:10px; padding:12px 14px; margin:10px 0; font-family:system-ui,-apple-system,sans-serif; box-shadow:0 3px 10px rgba(0,0,0,0.25);">
+  <div style=\"color:#f5f5f5; font-weight:600; margin-bottom:6px;\">📦 Cleon update available</div>
+  <div style=\"color:#dcdcdc; font-size:0.9em; margin-bottom:10px;\">Installed: <code style=\"color:#f8f8f2;\">{current}</code> &nbsp;→&nbsp; Latest: <code style=\"color:#f8f8f2;\">{latest}</code></div>
+  <div style="color:#dcdcdc; font-size:0.9em; margin-bottom:10px;">Upgrade with:</div>
+  <div style="position:relative; background:#272822; border-radius:6px; padding:8px 12px; color:#f8f8f2; font-family:'Fira Code',monospace; font-size:0.9em; line-height:1.4;">
+    {cmd}
+    {copy_btn}
+  </div>
+  <div style="margin-top:10px;">
+    <span style="color:#a0a0a0; font-size:0.85em;">Env: {"uv" if use_uv else "pip"}</span>
+    {run_btn}
+  </div>
+</div>
+"""
+            )
+        )
+        return
+    except Exception:
+        # Fallback to plain text
+        pass
+
+    print(f"\n📦 New cleon version available: {current} → {latest}")
+    print(f"   Upgrade: {cmd}\n")
 
 
 def _display_welcome_message() -> None:
@@ -476,9 +567,16 @@ def _display_welcome_message() -> None:
         return
 
     ext_installed = has_extension(verbose=False)
+    in_vscode = _is_vscode_notebook()
 
     # Extension status section
-    if ext_installed:
+    if in_vscode:
+        ext_html = """
+<div style="background:#2a1a1a; border:1px solid #5a2d2d; border-radius:6px; padding:10px 12px; margin-top:12px;">
+<div style="color:#FFD700; font-size:0.85em; margin-bottom:6px;">⚠️ VS Code notebooks detected</div>
+<div style="color:#f5d4d4; font-size:0.85em; line-height:1.5;">VS Code does not load JupyterLab extensions, so the Cleon UI buttons are unavailable here. Use <code>cleon jupyter lab</code> in a browser for the full UI, or keep using the magics in VS Code.</div>
+</div>"""
+    elif ext_installed:
         ext_html = """
 <div style="background:#1a2e1a; border:1px solid #2d5a2d; border-radius:6px; padding:10px 12px; margin-top:12px;">
 <div style="color:#90EE90; font-size:0.85em;">✅ Extension installed — code snippets have ▶ play buttons</div>

@@ -7,7 +7,11 @@ name = "cleon"
 version = "0.1.13"
 description = "A Genetic Dynasty of Agentic Clones for Jupyter Notebooks"
 requires-python = ">=3.9"
-dependencies = ["ipython>=8.0", "websocket-client>=1.6"]
+dependencies = [
+    "ipython>=8.0",
+    "websocket-client>=1.6",
+    "cleon-jupyter-extension>=0.1.0",
+]
 authors = [{ name = "Madhava Jay", email = "me@madhavajay.com" }]
 keywords = ["codex", "cleon", "ipython"]
 readme = "README.md"
@@ -22,6 +26,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
+
+[project.scripts]
+cleon = "cleon.cli:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -38,3 +45,10 @@ include = [
 
 [dependency-groups]
 dev = ["types-pygments>=2.19.0.20251121"]
+
+[project.optional-dependencies]
+# This extra is a no-op placeholder to signal an install without Jupyter/extension
+no-jupyter = []
+jupyter = [
+    "jupyterlab>=4",
+]
