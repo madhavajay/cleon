@@ -42,10 +42,17 @@ def _ensure_env(env_dir: Path, *, use_uv: bool = True, upgrade: bool = True) -> 
     if not _has_jupyter(py_path):
         packages.append("jupyterlab")
 
-    installer = [str(py_path), "-m", "pip", "install"]
-    if upgrade:
-        installer.append("-U")
-    installer += packages
+    # Use uv pip if we created the venv with uv
+    if use_uv and shutil.which("uv"):
+        installer = ["uv", "pip", "install", "--python", str(py_path)]
+        if upgrade:
+            installer.append("-U")
+        installer += packages
+    else:
+        installer = [str(py_path), "-m", "pip", "install"]
+        if upgrade:
+            installer.append("-U")
+        installer += packages
     _run(installer)
     return py_path
 

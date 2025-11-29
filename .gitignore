@@ -16,3 +16,4 @@ cleon_demo.log
 python/src/cleon/bin/*
 **/.yarn/*
 **/node_modules/*
+**/build_log.json

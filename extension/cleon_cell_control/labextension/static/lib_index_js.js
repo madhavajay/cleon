@@ -1,4 +1,19 @@
-import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
+"use strict";
+(self["webpackChunkcleon_cell_control"] = self["webpackChunkcleon_cell_control"] || []).push([["lib_index_js"],{
+
+/***/ "./lib/index.js":
+/*!**********************!*\
+  !*** ./lib/index.js ***!
+  \**********************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* harmony import */ var _jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @jupyterlab/notebook */ "webpack/sharing/consume/default/@jupyterlab/notebook");
+/* harmony import */ var _jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(_jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0__);
+
 const COMM_TARGET = 'cleon_cell_control';
 // Track the last cell inserted via play button per notebook so we can append sequentially
 const lastInsertedIndex = new WeakMap();
@@ -6,7 +21,7 @@ const plugin = {
     id: 'cleon-cell-control:plugin',
     description: 'JupyterLab extension for cell manipulation from kernel',
     autoStart: true,
-    requires: [INotebookTracker],
+    requires: [_jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0__.INotebookTracker],
     activate: (app, tracker) => {
         console.log('cleon-cell-control: activated');
         // Expose global function for buttons to call
@@ -35,7 +50,7 @@ const plugin = {
             // Execute the newly inserted cell
             setTimeout(async () => {
                 try {
-                    await NotebookActions.run(notebook.content, notebook.sessionContext);
+                    await _jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0__.NotebookActions.run(notebook.content, notebook.sessionContext);
                     console.log('cleon-cell-control: cell executed via button');
                 }
                 catch (err) {
@@ -121,7 +136,7 @@ const plugin = {
                                 // Execute the newly inserted cell using NotebookActions
                                 setTimeout(async () => {
                                     try {
-                                        await NotebookActions.run(notebook.content, notebook.sessionContext);
+                                        await _jupyterlab_notebook__WEBPACK_IMPORTED_MODULE_0__.NotebookActions.run(notebook.content, notebook.sessionContext);
                                         console.log('cleon-cell-control: cell executed');
                                     }
                                     catch (err) {
@@ -166,5 +181,10 @@ const plugin = {
         });
     }
 };
-export default plugin;
-//# sourceMappingURL=index.js.map
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (plugin);
+
+
+/***/ })
+
+}]);
+//# sourceMappingURL=lib_index_js.js.map
