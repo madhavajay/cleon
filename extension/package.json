@@ -54,6 +54,7 @@
   },
   "jupyterlab": {
     "extension": true,
-    "outputDir": "cleon_cell_control/labextension"
+    "outputDir": "cleon_cell_control/labextension",
+    "webpackConfig": "./webpack.config.js"
   }
 }
