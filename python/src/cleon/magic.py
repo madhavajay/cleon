@@ -999,7 +999,7 @@ def help() -> None:
     text = """**Pick an agent with a prefix:**
 
 ```
-@ Whats your name?
+: Whats your name?
 I am Codex!
 
 ~ Whats your name?
@@ -1339,11 +1339,11 @@ def _line_has_agent_prefix(line: str, prefixes: dict) -> tuple[str, str, str] | 
     Returns (matched_prefix, actual_prefix, magic_name) or None.
 
     Matches:
-        @ query         -> ("@", "@", "codex")
-        # @ query       -> ("# @", "@", "codex")
+        : query         -> (":", ":", "codex")
+        # : query       -> ("# :", ":", "codex")
         ~ query         -> ("~", "~", "claude")
         # ~ query       -> ("# ~", "~", "claude")
-        @codex query    -> ("@codex", "@", "codex")
+        :codex query    -> (":codex", ":", "codex")
         ~claude query   -> ("~claude", "~", "claude")
     """
     stripped = line.lstrip()
@@ -1355,7 +1355,7 @@ def _line_has_agent_prefix(line: str, prefixes: dict) -> tuple[str, str, str] | 
         for cand in candidates:
             if stripped.startswith(cand):
                 return cand, prefix, magic_name
-            # Commented prefix match: "# @" or "# @codex" etc
+            # Commented prefix match: "# :" or "# :codex" etc
             commented_prefix = f"# {cand}"
             if stripped.startswith(commented_prefix):
                 return commented_prefix, prefix, magic_name
@@ -1369,13 +1369,13 @@ def _detect_mixed_cell(raw_cell: str) -> tuple[str, str, str, str] | None:
 
     Examples:
         print("test")
-        @ what do you think?
+        : what do you think?
 
         print("test")
-        # @ what do you think?   (agent commented the prefix)
+        # : what do you think?   (agent commented the prefix)
 
     Would return:
-        ("print(\"test\")", "what do you think?", "codex", "@")
+        ("print(\"test\")", "what do you think?", "codex", ":")
     """
     if not raw_cell or not _AUTO_ROUTE_RULES:
         return None
@@ -1439,7 +1439,7 @@ def _detect_mixed_cell(raw_cell: str) -> tuple[str, str, str, str] | None:
     python_code = "\n".join(python_lines).rstrip()
     agent_text = "\n".join(agent_lines)
 
-    # Strip the prefix from the agent query (handles both "@ " and "# @ ")
+    # Strip the prefix from the agent query (handles both ": " and "# : ")
     agent_query = _strip_prompt_prefix(agent_text, matched_prefix)
 
     # Don't split if there's no actual Python code
@@ -1455,7 +1455,7 @@ def _queue_agent_cell(agent_query: str, magic_name: str, prefix: str) -> None:
         if _CELL_CONTROL_AVAILABLE:
             from cleon_cell_control import insert_and_run  # type: ignore[import-not-found,import-untyped]
 
-            # Use the prefix format (e.g., "@ query") not magic format
+            # Use the prefix format (e.g., ": query") not magic format
             cell_content = f"{prefix} {agent_query}"
             insert_and_run(cell_content)
         else:
@@ -1695,14 +1695,14 @@ def _render_markdown_fallback(content: str) -> str:
                 .replace("</", "<\\/")  # Escape script closing tags
                 .replace('"', "&quot;")  # Escape double quotes for HTML attribute
             )
-            # JavaScript to handle commented agent queries (# @ -> @)
+            # JavaScript to handle commented agent queries (# prefix -> prefix)
             run_btn = (
                 f'<button onclick="'
                 f"if (window.cleonInsertAndRun) {{"
                 f"  var code = `{escaped_for_js}`;"
                 f"  var lines = code.split('\\n');"
                 f"  var firstLine = lines[0].trim();"
-                f"  if (firstLine.match(/^#\\s*[@~>]\\s/)) {{"
+                f"  if (firstLine.match(/^#\\s*[:@~>]\\s/)) {{"
                 f"    lines[0] = firstLine.replace(/^#\\s*/, '');"
                 f"    code = lines.join('\\n');"
                 f"  }}"

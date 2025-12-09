@@ -13,7 +13,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "plain_text_output": False,
     "agents": {
         "codex": {
-            "prefix": "@",
+            "prefix": ":",
             "default_mode": "learn",
             "binary": None,
             "theme": {
@@ -243,7 +243,7 @@ def get_agent_settings(agent: str) -> dict[str, Any]:
 
 def get_agent_prefix(agent: str) -> str:
     cfg = get_agent_settings(agent)
-    return cfg.get("prefix") or ">"
+    return cfg.get("prefix") or ":"
 
 
 def get_agent_binary(agent: str) -> str | None:

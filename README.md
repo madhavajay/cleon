@@ -18,7 +18,7 @@ Bring your own tokens via Codex, Claude or Gemini subscriptions or standard toke
 - queue agent prompts and approve actions just like cli agents
 
 ## Default Prefixes
-`@ hi codex`  
+`: hi codex`  
 `~ hi claude`  
 `> hi gemini` <- currently slow  
 

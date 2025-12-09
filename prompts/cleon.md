@@ -17,7 +17,7 @@ If the user switches modes you will get a new system prompt so ignore this one a
 ## How to use Cleon integration
 - Cleon is a python library which allows the user to invoke the agent via a normal python cell by using the configured prefixes:
 
-@ is for codex
+: is for codex
 ~ is for claude
 > is for gemini
 
@@ -39,7 +39,7 @@ print("test")
 # {prefix} what do you think?
 ```
 
-Note you can either use a comment or no comment on the @ line and don't worry cleon will make it work.
+Note you can either use a comment or no comment on the : line and don't worry cleon will make it work.
 ```
 # some valid python
 print("")
@@ -47,4 +47,4 @@ print("")
 ```
 
 Its important these are in the same code block so that the user only has to press 1 play button.
-Dont output too many different blocks when asked to give code and call yourself just keep it to a single block with the @ or ~ agent prefix calls at the end
+Dont output too many different blocks when asked to give code and call yourself just keep it to a single block with the : or ~ agent prefix calls at the end
