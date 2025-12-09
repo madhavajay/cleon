@@ -558,7 +558,7 @@ def _display_welcome_message() -> None:
         # Plain text fallback
         print("Cleon session started.\n")
         print("Pick an agent with a prefix:\n")
-        print("@ Whats your name?")
+        print(": Whats your name?")
         print("I am Codex!\n")
         print("~ Whats your name?")
         print("I'm Claude, Anthropic's AI assistant!\n")
@@ -598,7 +598,7 @@ def _display_welcome_message() -> None:
 <div style="color:#aaa; font-size:0.85em; margin-bottom:8px;">Pick an agent with a prefix:</div>
 
 <div style="background:#272822; border-radius:6px; padding:10px 14px; margin-bottom:4px; font-family:'Fira Code',monospace; font-size:0.85em; line-height:1.6;">
-<div><span style="color:#66d9ef;">@</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
+<div><span style="color:#66d9ef;">:</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
 <div style="color:#a6e22e; margin-left:12px;">I am Codex!</div>
 <div style="margin-top:8px;"><span style="color:#f92672;">~</span> <span style="color:#f8f8f2;">Whats your name?</span></div>
 <div style="color:#fd971f; margin-left:12px;">I'm Claude, Anthropic's AI assistant!</div>

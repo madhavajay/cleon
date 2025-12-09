@@ -155,19 +155,22 @@ class TestTemplateLoading:
 class TestMixedCellDetection:
     """Tests for detecting mixed cells (Python + agent query)."""
 
-    def test_detect_mixed_cell_with_at_prefix(self):
-        """Test detecting cell with Python code followed by @ query."""
+    def test_detect_mixed_cell_with_colon_prefix(self):
+        """Test detecting cell with Python code followed by : query."""
         _setup_mock_ipython()
 
         mods_to_remove = [k for k in sys.modules if k.startswith("cleon")]
         for mod in mods_to_remove:
             del sys.modules[mod]
 
-        from cleon.magic import _detect_mixed_cell
+        from cleon.magic import _AUTO_ROUTE_RULES, _detect_mixed_cell
+
+        _AUTO_ROUTE_RULES.clear()
+        _AUTO_ROUTE_RULES.update({":": ("codex", "codex"), "~": ("claude", "claude")})
 
         cell = """x = 1
 print(x)
-@ explain this code"""
+: explain this code"""
 
         result = _detect_mixed_cell(cell)
         assert result is not None
@@ -183,11 +186,14 @@ print(x)
         for mod in mods_to_remove:
             del sys.modules[mod]
 
-        from cleon.magic import _detect_mixed_cell
+        from cleon.magic import _AUTO_ROUTE_RULES, _detect_mixed_cell
+
+        _AUTO_ROUTE_RULES.clear()
+        _AUTO_ROUTE_RULES.update({":": ("codex", "codex"), "~": ("claude", "claude")})
 
         cell = """def add(a, b):
     return a + b
-# @ review this function"""
+# : review this function"""
 
         result = _detect_mixed_cell(cell)
         assert result is not None
@@ -219,8 +225,8 @@ class TestAgentPrefixDetection:
     Returns (matched_prefix, actual_prefix, magic_name) or None.
     """
 
-    def test_at_prefix_detection(self):
-        """Test @ prefix is detected."""
+    def test_colon_prefix_detection(self):
+        """Test : prefix is detected."""
         _setup_mock_ipython()
 
         mods_to_remove = [k for k in sys.modules if k.startswith("cleon")]
@@ -229,13 +235,13 @@ class TestAgentPrefixDetection:
 
         from cleon.magic import _line_has_agent_prefix
 
-        prefixes = {"@": ("codex", "codex"), "~": ("claude", "claude")}
+        prefixes = {":": ("codex", "codex"), "~": ("claude", "claude")}
 
-        result = _line_has_agent_prefix("@ hello world", prefixes)
+        result = _line_has_agent_prefix(": hello world", prefixes)
         assert result is not None
         matched_prefix, actual_prefix, magic_name = result
-        assert matched_prefix == "@"
-        assert actual_prefix == "@"
+        assert matched_prefix == ":"
+        assert actual_prefix == ":"
         assert magic_name == "codex"
 
     def test_tilde_prefix_detection(self):
@@ -248,7 +254,7 @@ class TestAgentPrefixDetection:
 
         from cleon.magic import _line_has_agent_prefix
 
-        prefixes = {"@": ("codex", "codex"), "~": ("claude", "claude")}
+        prefixes = {":": ("codex", "codex"), "~": ("claude", "claude")}
 
         result = _line_has_agent_prefix("~ ask claude something", prefixes)
         assert result is not None
@@ -258,7 +264,7 @@ class TestAgentPrefixDetection:
         assert magic_name == "claude"
 
     def test_commented_prefix_detection(self):
-        """Test # @ commented prefix is detected."""
+        """Test # : commented prefix is detected."""
         _setup_mock_ipython()
 
         mods_to_remove = [k for k in sys.modules if k.startswith("cleon")]
@@ -267,13 +273,13 @@ class TestAgentPrefixDetection:
 
         from cleon.magic import _line_has_agent_prefix
 
-        prefixes = {"@": ("codex", "codex"), "~": ("claude", "claude")}
+        prefixes = {":": ("codex", "codex"), "~": ("claude", "claude")}
 
-        result = _line_has_agent_prefix("# @ this is a query", prefixes)
+        result = _line_has_agent_prefix("# : this is a query", prefixes)
         assert result is not None
         matched_prefix, actual_prefix, magic_name = result
-        assert matched_prefix == "# @"
-        assert actual_prefix == "@"
+        assert matched_prefix == "# :"
+        assert actual_prefix == ":"
         assert magic_name == "codex"
 
     def test_no_prefix_returns_none(self):
@@ -286,7 +292,7 @@ class TestAgentPrefixDetection:
 
         from cleon.magic import _line_has_agent_prefix
 
-        prefixes = {"@": ("codex", "codex"), "~": ("claude", "claude")}
+        prefixes = {":": ("codex", "codex"), "~": ("claude", "claude")}
 
         result = _line_has_agent_prefix("print('hello')", prefixes)
         assert result is None
