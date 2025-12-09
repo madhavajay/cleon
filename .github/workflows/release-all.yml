@@ -141,16 +141,6 @@ jobs:
           ref: main
           submodules: recursive
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: python/cleon
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
