@@ -117,18 +117,23 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             compatibility: "--compatibility manylinux2014"
+            manylinux: manylinux2014
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             compatibility: "--compatibility manylinux2014"
+            manylinux: manylinux2014
           - os: macos-latest
             target: aarch64-apple-darwin
             compatibility: ""
+            manylinux: off
           - os: macos-15-intel
             target: x86_64-apple-darwin
             compatibility: ""
+            manylinux: off
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             compatibility: ""
+            manylinux: off
 
     steps:
       - uses: actions/checkout@v4
@@ -146,21 +151,15 @@ jobs:
         with:
           workspaces: python/cleon
 
-      - name: Build and stage cleon CLI
-        env:
-          OPENSSL_STATIC: "1"
-          OPENSSL_VENDORED: "1"
-        run: |
-          ./scripts/stage_cli.sh ${{ matrix.target }}
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           working-directory: .
           target: ${{ matrix.target }}
           args: --release --out dist --manifest-path python/cleon/Cargo.toml ${{ matrix.compatibility }}
+          before-script: ./scripts/stage_cli.sh ${{ matrix.target }}
           sccache: 'true'
-          manylinux: auto
+          manylinux: ${{ matrix.manylinux }}
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
