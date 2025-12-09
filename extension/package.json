@@ -1,6 +1,6 @@
 {
   "name": "cleon-cell-control",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "JupyterLab extension for cell manipulation from kernel",
   "keywords": [
     "jupyter",
