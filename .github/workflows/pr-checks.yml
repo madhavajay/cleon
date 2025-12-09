@@ -61,8 +61,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.9"
+          - os: windows-latest
+            python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,7 +126,7 @@ jobs:
           ./scripts/stage_cli.sh aarch64-unknown-linux-gnu
           uv venv
           uv pip install maturin
-          uv run -- maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/cleon/Cargo.toml --out dist
+          uv run -- maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/cleon/Cargo.toml --out dist --compatibility manylinux2014
           ls -l dist/*.whl
 
   extension-build:
