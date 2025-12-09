@@ -31,7 +31,7 @@ classifiers = [
 cleon = "cleon.cli:main"
 
 [tool.maturin]
-features = ["pyo3/extension-module", "pyo3/abi3-py39"]
+features = ["pyo3/extension-module"]
 manifest-path = "cleon/Cargo.toml"
 module-name = "cleon._cleon"
 python-source = "src"
@@ -42,7 +42,6 @@ include = [
     "src/cleon/bin/*",
     "src/cleon/images/*",
 ]
-compatibility = "manylinux2014"
 
 [dependency-groups]
 dev = ["types-pygments>=2.19.0.20251121"]

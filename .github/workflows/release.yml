@@ -95,28 +95,18 @@ jobs:
           # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            compatibility: "--compatibility manylinux2014"
-            manylinux: manylinux2014
           # Linux aarch64 (native arm runner)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            compatibility: "--compatibility manylinux2014"
-            manylinux: manylinux2014
           # macOS arm64
           - os: macos-latest
             target: aarch64-apple-darwin
-            compatibility: ""
-            manylinux: off
           # macOS x86_64 (macOS 15 Intel runner)
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            compatibility: ""
-            manylinux: off
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            compatibility: ""
-            manylinux: off
 
     steps:
       - uses: actions/checkout@v4
@@ -124,14 +114,31 @@ jobs:
           ref: main
           submodules: recursive
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python/cleon
+
+      - name: Build and stage cleon CLI
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+        run: |
+          ./scripts/stage_cli.sh ${{ matrix.target }}
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           working-directory: .
           target: ${{ matrix.target }}
-          args: --release --out dist --manifest-path python/cleon/Cargo.toml --before-build "./scripts/stage_cli.sh ${{ matrix.target }}" ${{ matrix.compatibility }}
+          args: --release --out dist --manifest-path python/cleon/Cargo.toml
           sccache: 'true'
-          manylinux: ${{ matrix.manylinux }}
+          manylinux: auto
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_VENDORED: "1"
