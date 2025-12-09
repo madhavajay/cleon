@@ -139,8 +139,7 @@ jobs:
         with:
           working-directory: .
           target: ${{ matrix.target }}
-          args: --release --out dist --manifest-path python/cleon/Cargo.toml ${{ matrix.compatibility }}
-          before-script: ./scripts/stage_cli.sh ${{ matrix.target }}
+          args: --release --out dist --manifest-path python/cleon/Cargo.toml --before-build "./scripts/stage_cli.sh ${{ matrix.target }}" ${{ matrix.compatibility }}
           sccache: 'true'
           manylinux: ${{ matrix.manylinux }}
         env:
