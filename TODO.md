@@ -1,10 +1,13 @@
 # TODO
 
-## Current Status: Legacy Backends REMOVED - All Providers Use PiMonoBackend
+## Current Status: ✅ MIGRATION COMPLETE - All Providers Use PiMonoBackend
 
 ### Summary (2026-01-07)
 
-**MAJOR MILESTONE: Legacy code cleanup complete!**
+**MAJOR MILESTONE: pi-mono-rust migration complete!**
+
+All providers (Codex, Claude, Gemini) now use `PiMonoBackend` via pi-mono-rust.
+Live testing validated for all three providers. Legacy code removed.
 
 All legacy backends have been removed. Cleon now exclusively uses `PiMonoBackend` via pi-mono-rust for all providers (Codex, Claude, Gemini). This eliminates:
 - The `codex` submodule and `codex-*` crate dependencies
@@ -113,6 +116,22 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 - [x] Verify `cleon.resume()` works in Jupyter context
 - [x] Verify tool streaming events flow correctly
 - [x] Removed obsolete `test_magic.py` (was testing removed SharedSession)
+
+---
+
+## Future Work (Not Blocking)
+
+### Tool Approval Hooks
+- [ ] Wire `on_approval` callback in `PiMonoBackend.send()`
+- [ ] Currently ignored with `del on_approval  # TODO: implement approval hooks`
+- [ ] pi-mono-rust PyO3 bindings need tool support (basic chat mode only currently)
+- [ ] Approval flow: magic.py calls `_prompt_approval()` but callback is not wired
+
+This is not blocking the migration since:
+1. Basic chat and tool streaming work (events flow to Jupyter)
+2. pi-mono-rust handles tool execution internally
+3. Approval hooks are only needed for interactive approval prompts in notebooks
+4. This can be added later when pi-mono-rust PyO3 exposes tool hooks
 
 ---
 
