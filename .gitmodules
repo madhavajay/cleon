@@ -7,3 +7,6 @@
 [submodule "gemini-cli"]
 	path = gemini-cli
 	url = https://github.com/google-gemini/gemini-cli.git
+[submodule "pi-mono-rust"]
+	path = pi-mono-rust
+	url = https://github.com/madhavajay/pi-mono-rust.git
