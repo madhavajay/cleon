@@ -185,13 +185,13 @@ class PiMonoBackend:
         extra_env: Mapping[str, str] | None = None,
         session_id: str | None = None,
     ) -> None:
-        # Lazy import to avoid hard dependency on pi_mono at module load
+        # Lazy import to avoid hard dependency on _native at module load
         try:
-            from pi_mono import AgentSession, get_agent_dir
+            from cleon._native import AgentSession, get_agent_dir
         except ImportError as exc:
             raise RuntimeError(
-                "pi_mono is not installed. "
-                "Build and install it from pi-mono-rust: maturin develop --features python"
+                "cleon._native is not available. "
+                "Build and install cleon with maturin: cd python && maturin develop"
             ) from exc
 
         self._agent = agent.lower()

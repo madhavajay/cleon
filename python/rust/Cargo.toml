@@ -1,0 +1,16 @@
+[package]
+name = "cleon-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pi = { path = "../../pi-mono-rust" }
+pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"] }
+
+# Mark as isolated workspace (not part of parent workspace)
+[workspace]

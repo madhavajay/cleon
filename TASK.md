@@ -1,31 +1,21 @@
 # TASK
 
-## STATUS: 🔄 IN PROGRESS - Bundle PyO3 bindings into Cleon
+## STATUS: ✅ COMPLETED - Bundle PyO3 bindings into Cleon
 
-Move PyO3 bindings from pi-mono-rust into cleon so that `pip install cleon` provides everything in a single package with abi3 (one binary per OS).
+PyO3 bindings have been moved from pi-mono-rust into cleon. Now `pip install cleon` provides everything in a single package with abi3 (one binary per OS).
 
 ---
 
-## Goal
+## Achieved
 
-Restructure the architecture so that:
-- **pi-mono-rust** remains a pure Rust library (port of pi-mono TypeScript)
+The architecture has been restructured:
+- **pi-mono-rust** is now a pure Rust library (port of pi-mono TypeScript)
 - **cleon** is a single Python package that includes:
   - Python code (backend.py, magic.py, oauth.py, etc.)
   - Rust PyO3 bindings that wrap pi-mono-rust
   - Uses abi3 stable ABI (one wheel per OS, not per Python version)
 
-## Current State (as of 2026-01-07)
-
-```
-pi-mono-rust/              ← Rust port + PyO3 bindings (mixed)
-  └── src/python/mod.rs    ← PyO3 bindings here (WRONG PLACE)
-python/cleon/              ← Pure Python, imports external pi_mono
-```
-
-**Problem:** Users must run `maturin develop` in pi-mono-rust separately before cleon works.
-
-## Target State
+## Final State
 
 ```
 pi-mono-rust/              ← Pure Rust library (NO PyO3)

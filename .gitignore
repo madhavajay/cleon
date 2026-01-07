@@ -6,6 +6,8 @@
 /python/__pycache__/
 /python/cleon/target/*
 /python/src/cleon/_cleon*.so
+/python/src/cleon/_native*.so
+/python/rust/target/
 
 **/__pycache__/*
 .claude/*

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "cleon"
@@ -31,13 +31,11 @@ classifiers = [
 [project.scripts]
 cleon = "cleon.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/cleon"]
-include = [
-    "src/cleon/py.typed",
-    "src/cleon/bin/*",
-    "src/cleon/images/*",
-]
+[tool.maturin]
+manifest-path = "rust/Cargo.toml"
+module-name = "cleon._native"
+python-source = "src"
+features = ["pyo3/extension-module"]
 
 [dependency-groups]
 dev = ["types-pygments>=2.19.0.20251121"]
@@ -46,11 +44,11 @@ dev = ["types-pygments>=2.19.0.20251121"]
 ignore_missing_imports = false
 
 [[tool.mypy.overrides]]
-module = "pi_mono.*"
+module = "cleon._native"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "pi_mono"
+module = "cleon._native.*"
 ignore_missing_imports = true
 
 [project.optional-dependencies]

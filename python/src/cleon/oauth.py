@@ -212,10 +212,10 @@ def _refresh_active_codex_backend() -> None:
 # ============================================================================
 
 
-def _check_pimono_available() -> bool:
-    """Check if pi_mono is available for OAuth operations."""
+def _check_native_available() -> bool:
+    """Check if cleon._native is available for OAuth operations."""
     try:
-        import pi_mono  # noqa: F401
+        from cleon import _native  # noqa: F401
 
         return True
     except ImportError:
@@ -223,13 +223,13 @@ def _check_pimono_available() -> bool:
 
 
 def login_claude_pimono() -> None:
-    """Interactive OAuth login for Claude Pro/Max using pi-mono-rust.
+    """Interactive OAuth login for Claude Pro/Max using cleon._native.
 
-    This function uses the pi-mono-rust library for OAuth, providing consistent
+    This function uses the cleon._native Rust bindings for OAuth, providing consistent
     auth handling across all providers.
     """
     try:
-        from pi_mono import (
+        from cleon._native import (
             AuthStorage,
             anthropic_exchange_code,
             anthropic_get_auth_url,
@@ -237,7 +237,7 @@ def login_claude_pimono() -> None:
         )
     except ImportError:
         print(
-            "pi_mono not installed. Install pi-mono-rust with Python bindings or use login_claude()."
+            "cleon._native not available. Build cleon with maturin: cd python && maturin develop"
         )
         return
 
@@ -282,13 +282,13 @@ def login_claude_pimono() -> None:
 
 
 def login_codex_pimono() -> None:
-    """Interactive OAuth login for OpenAI Codex using pi-mono-rust.
+    """Interactive OAuth login for OpenAI Codex using cleon._native.
 
-    This function uses the pi-mono-rust library for OAuth, providing consistent
+    This function uses the cleon._native Rust bindings for OAuth, providing consistent
     auth handling across all providers.
     """
     try:
-        from pi_mono import (
+        from cleon._native import (
             AuthStorage,
             get_agent_dir,
             openai_codex_exchange_code,
@@ -296,7 +296,7 @@ def login_codex_pimono() -> None:
         )
     except ImportError:
         print(
-            "pi_mono not installed. Install pi-mono-rust with Python bindings or use native Codex auth."
+            "cleon._native not available. Build cleon with maturin: cd python && maturin develop"
         )
         return
 
@@ -338,7 +338,7 @@ def login_codex_pimono() -> None:
 
 
 def login_pimono(provider: str = "claude") -> None:
-    """Unified OAuth login using pi-mono-rust.
+    """Unified OAuth login using cleon._native.
 
     Args:
         provider: "claude" (or "anthropic") for Claude, "codex" for OpenAI Codex
