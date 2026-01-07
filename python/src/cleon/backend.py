@@ -283,14 +283,30 @@ class PiMonoBackend:
         on_event: Callable[[Any], None] | None = None,
         on_approval: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> tuple[Any, list[Any]]:
-        del on_approval  # TODO: implement approval hooks
-
         with self._send_lock:
             # Reset state for this turn
             self._current_events = []
             self._current_on_event = on_event
             self._turn_completed.clear()
             self._final_message = None
+
+            # Set up approval callback if provided
+            if on_approval is not None:
+                # Wrap the cleon approval callback in the format pi-mono-rust expects.
+                # cleon's on_approval returns: "approve", "approve_session", "deny", "abort"
+                # pi-mono-rust expects the same strings.
+                def approval_wrapper(request: dict[str, Any]) -> str:
+                    result = on_approval(request)
+                    # Ensure we return a valid string
+                    if result in ("approve", "approve_session", "deny", "abort"):
+                        return result
+                    # Default to approve if unexpected return value
+                    return "approve"
+
+                self._session.set_approval_callback(approval_wrapper)
+            else:
+                # Clear any previous approval callback
+                self._session.set_approval_callback(None)
 
             try:
                 # Send the prompt
@@ -314,6 +330,8 @@ class PiMonoBackend:
 
             finally:
                 self._current_on_event = None
+                # Clear approval callback after prompt completes
+                self._session.set_approval_callback(None)
 
     def run_once(self, prompt: str) -> tuple[Any, list[Any]]:
         """Execute a single-shot prompt (fresh session)."""

@@ -121,75 +121,34 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 
 ## Future Work (Not Blocking)
 
-### Tool Approval Hooks
-- [ ] Wire `on_approval` callback in `PiMonoBackend.send()`
-- [ ] Currently ignored with `del on_approval  # TODO: implement approval hooks`
-- [ ] pi-mono-rust PyO3 bindings need tool support (basic chat mode only currently)
-- [ ] Approval flow: magic.py calls `_prompt_approval()` but callback is not wired
+### Tool Approval Hooks - ✅ IMPLEMENTED (2026-01-07)
 
-**Implementation Requirements (analyzed 2026-01-07):**
+Tool approval hooks are now fully implemented! The complete flow:
 
-To implement approval hooks, changes are needed in three places:
+1. **pi-mono-rust Agent core** (`pi-mono-rust/src/agent/mod.rs`):
+   - [x] `ApprovalRequest` struct and `ApprovalResponse` enum added
+   - [x] `ApprovalRequest` variant added to `AgentEvent` enum
+   - [x] `on_approval` callback added to `AgentLoopConfig`
+   - [x] `execute_tool_calls()` modified to call approval callback before tool execution
+   - [x] Session-approved tools tracked (ApproveSession remembers tool for session)
+   - [x] Tests added: `should_call_approval_callback_for_tool_calls`, `should_deny_tool_call_when_approval_denied`, `should_remember_session_approved_tools`
 
-#### Sub-task 1: pi-mono-rust Agent core (`pi-mono-rust/src/agent/mod.rs`)
-- [ ] Add `ApprovalRequest` variant to `AgentEvent` enum:
-  ```rust
-  ApprovalRequest {
-      tool_call_id: String,
-      tool_name: String,
-      args: Value,
-      command: Option<String>,  // shell command if applicable
-      cwd: Option<String>,       // working directory
-      reason: Option<String>,    // why approval needed
-  }
-  ```
-- [ ] Add `ApprovalResponse` enum: `Approve | ApproveSession | Deny | Abort`
-- [ ] Add `on_approval: Option<Box<dyn Fn(&ApprovalRequest) -> ApprovalResponse>>` to `AgentOptions`
-- [ ] Modify `execute_tool_calls()` in `agent/mod.rs:528` to:
-  1. Before executing tool, call `on_approval` callback if set
-  2. Based on response: proceed, skip tool, or abort entire loop
-  3. Track session-approved tools to auto-approve subsequent calls
-- [ ] Add tests for approval flow in `pi-mono-rust/src/agent/tests/`
+2. **PyO3 bindings** (`pi-mono-rust/src/python/mod.rs`):
+   - [x] `set_approval_callback(callback)` method on `PyAgentSession`
+   - [x] Python callback receives dict with: tool_call_id, tool_name, args, command, cwd, reason
+   - [x] Returns string: "approve", "approve_session", "deny", "abort"
+   - [x] GIL handled properly via `Python::with_gil()`
 
-#### Sub-task 2: PyO3 bindings (`pi-mono-rust/src/python/mod.rs`)
-- [ ] Add `PyApprovalRequest` class with fields matching Rust struct
-- [ ] Add `set_approval_callback(callback: PyObject)` method to `PyAgentSession`
-- [ ] In Python callback, convert PyApprovalRequest to dict for magic.py
-- [ ] Convert Python string response ("approve", "deny", "abort") to Rust enum
-- [ ] Handle GIL properly - callback runs during agent loop, must acquire GIL
+3. **PiMonoBackend** (`python/src/cleon/backend.py`):
+   - [x] `send()` accepts `on_approval` callback
+   - [x] Callback wired to `_session.set_approval_callback()`
+   - [x] Callback cleared after prompt completes
 
-#### Sub-task 3: PiMonoBackend (`python/src/cleon/backend.py`)
-- [ ] Store `on_approval` callback in `PiMonoBackend.__init__`
-- [ ] In `send()`, if `on_approval` provided, call `_session.set_approval_callback()`
-- [ ] Create wrapper that translates pi-mono-rust approval dict to cleon format
-- [ ] Expected event format for magic.py `_prompt_approval()`:
-  ```python
-  {
-      "kind": "approval",  # or tool name
-      "command": "...",     # shell command
-      "cwd": "...",         # working directory
-      "reason": "...",      # why approval needed
-  }
-  ```
-
-**Why this is complex:**
-- pi-mono-rust's `execute_tool_calls()` runs synchronously inside the agent loop
-- Approval requires pausing execution and waiting for user input
-- Current design: callback-based (sync) - callback blocks until user responds
-- Alternative: channel-based (async) - would require bigger refactor
-
-**Recommended approach:**
-Use synchronous callback that blocks the agent loop until approval received.
-This works because:
-1. Jupyter notebook cells already block during `%%codex` execution
-2. `_prompt_approval()` in magic.py uses `time.sleep(0.05)` polling anyway
-3. No need for async - the agent loop can simply wait
-
-This is not blocking the migration since:
-1. Basic chat and tool streaming work (events flow to Jupyter)
-2. pi-mono-rust handles tool execution internally
-3. Approval hooks are only needed for interactive approval prompts in notebooks
-4. This can be added later when pi-mono-rust PyO3 exposes tool hooks
+**Approval Response Behaviors:**
+- `"approve"` - Execute this tool call
+- `"approve_session"` - Execute and auto-approve this tool name for rest of session
+- `"deny"` - Skip tool with "Tool call denied by user" error result
+- `"abort"` - Deny all remaining tool calls and end agent loop
 
 ---
 
@@ -211,6 +170,7 @@ This is not blocking the migration since:
 | `AgentSession::get_last_assistant_text()` | `python/mod.rs:405` | Extract response |
 | `AgentSession::dispose()` | `python/mod.rs:445` | Cleanup |
 | `AgentSession::abort()` | `python/mod.rs:362` | Cancel operation |
+| `AgentSession::set_approval_callback()` | `python/mod.rs:340` | Tool approval hooks |
 | `get_agent_dir()` | `python/mod.rs:765` | Path resolution |
 | `anthropic_get_auth_url()` | `python/mod.rs:676` | OAuth flow |
 | `anthropic_exchange_code()` | `python/mod.rs:683` | OAuth flow |
@@ -219,12 +179,12 @@ This is not blocking the migration since:
 | `openai_codex_exchange_code()` | `python/mod.rs:733` | OAuth flow |
 | `openai_codex_refresh_token()` | `python/mod.rs:749` | Token refresh |
 
-### Gaps vs Cleon Usage ⚠️
+### Gaps vs Cleon Usage ✅ ALL RESOLVED
 
-| Missing API | Cleon Need | Status |
-|-------------|------------|--------|
-| Tool approval callback | `on_approval` in `backend.send()` | Not implemented |
-| `AgentSession::set_approval_callback()` | Block for user approval | Not implemented |
+| Previously Missing API | Status |
+|------------------------|--------|
+| Tool approval callback | ✅ Implemented via `set_approval_callback()` |
+| `AgentSession::set_approval_callback()` | ✅ Implemented in PyO3 bindings |
 
 ### Event Types Streamed
 
@@ -240,8 +200,8 @@ AgentSessionEvent::AutoCompactionStart
 AgentSessionEvent::AutoCompactionEnd
 ```
 
-**Missing event type:**
-- `ApprovalRequest` - needed for tool approval flow
+**Event types now include:**
+- `ApprovalRequest` - ✅ implemented for tool approval flow
 
 ---
 
