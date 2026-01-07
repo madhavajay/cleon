@@ -354,3 +354,127 @@ class TestPiMonoBackendEventStreaming:
         assert len(set(callback_threads)) == 1, f"Multiple threads: {set(callback_threads)}"
 
         backend.stop()
+
+
+@pytest.mark.skipif(not LIVE_TEST, reason="Live API tests disabled")
+class TestPiMonoBackendSessionResume:
+    """Tests for session resume across kernel restarts."""
+
+    def test_session_resume_across_restart(self):
+        """Test that a session can be resumed after stopping the backend (simulating kernel restart).
+
+        This tests the critical use case of Jupyter kernel restarts where sessions should persist
+        and be resumable across kernel lifecycle events.
+        """
+        from cleon.backend import PiMonoBackend
+        import os
+
+        # Step 1: Create initial session and send a prompt
+        try:
+            backend1 = PiMonoBackend(agent="claude")
+        except RuntimeError as e:
+            pytest.skip(f"Claude auth not available: {e}")
+
+        # Send first prompt
+        result1, _ = backend1.send("Say 'hello'")
+        assert result1 is not None
+        assert "final_message" in result1
+
+        # Get session file path before stopping
+        session_file = backend1._session.session_file()
+        session_id = backend1._session.session_id()
+        assert session_file is not None, "Session file should be set after first prompt"
+        assert session_id is not None, "Session ID should be set after first prompt"
+
+        # Verify session file exists
+        assert os.path.exists(session_file), f"Session file should exist: {session_file}"
+
+        # Stop the backend (simulates kernel shutdown)
+        stop_info = backend1.stop()
+        assert stop_info.session_id is not None, "Stop should return session info for resume"
+
+        # Verify session file still exists after stop
+        assert os.path.exists(session_file), f"Session file should persist after stop: {session_file}"
+
+        # Step 2: Create new backend and resume the session (simulates kernel restart)
+        try:
+            backend2 = PiMonoBackend(agent="claude", session_id=stop_info.session_id)
+        except RuntimeError as e:
+            pytest.skip(f"Failed to create resumed backend: {e}")
+
+        # Verify the resumed backend can send prompts
+        result2, _ = backend2.send("Say 'resumed successfully'")
+        assert result2 is not None
+        assert "final_message" in result2
+
+        # Verify stats show multiple messages (from both sessions)
+        stats = backend2._session.get_session_stats()
+        # We should have at least 2 user messages (one from each session)
+        assert stats.get("user_messages", 0) >= 2, f"Should have messages from both sessions. Stats: {stats}"
+        assert stats.get("assistant_messages", 0) >= 2, f"Should have assistant messages from both sessions. Stats: {stats}"
+
+        backend2.stop()
+
+    def test_session_file_persistence(self):
+        """Test that session files are created and persisted correctly."""
+        from cleon.backend import PiMonoBackend
+        import os
+
+        try:
+            backend = PiMonoBackend(agent="claude")
+        except RuntimeError as e:
+            pytest.skip(f"Claude auth not available: {e}")
+
+        # Before any prompts, session may or may not have a file
+        initial_file = backend._session.session_file()
+
+        # Send a prompt to trigger session file creation
+        result, _ = backend.send("Say 'hello'")
+        assert result is not None
+
+        # After prompt, session file should exist
+        session_file = backend._session.session_file()
+        assert session_file is not None, "Session file should be created after first prompt"
+        assert os.path.exists(session_file), f"Session file should exist on disk: {session_file}"
+
+        # Get stats to verify session is tracking correctly
+        stats = backend._session.get_session_stats()
+        assert stats is not None
+        assert stats.get("user_messages", 0) >= 1
+        assert stats.get("assistant_messages", 0) >= 1
+
+        backend.stop()
+
+        # Verify file still exists after stop
+        assert os.path.exists(session_file), f"Session file should persist after stop: {session_file}"
+
+    def test_session_stats_tracking(self):
+        """Test that session stats are tracked correctly across messages."""
+        from cleon.backend import PiMonoBackend
+
+        try:
+            backend = PiMonoBackend(agent="claude")
+        except RuntimeError as e:
+            pytest.skip(f"Claude auth not available: {e}")
+
+        # Get initial stats (should be empty or minimal)
+        initial_stats = backend._session.get_session_stats()
+        initial_user_msgs = initial_stats.get("user_messages", 0)
+
+        # Send first prompt
+        result1, _ = backend.send("Say 'one'")
+        assert result1 is not None
+
+        stats1 = backend._session.get_session_stats()
+        assert stats1.get("user_messages", 0) >= initial_user_msgs + 1
+        assert stats1.get("assistant_messages", 0) >= 1
+
+        # Send second prompt
+        result2, _ = backend.send("Say 'two'")
+        assert result2 is not None
+
+        stats2 = backend._session.get_session_stats()
+        assert stats2.get("user_messages", 0) >= stats1.get("user_messages", 0) + 1
+        assert stats2.get("total_messages", 0) > stats1.get("total_messages", 0)
+
+        backend.stop()

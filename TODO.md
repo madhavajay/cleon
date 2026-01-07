@@ -1,6 +1,6 @@
 # TODO
 
-## Current Status: Live Testing PASSED for Claude and Codex
+## Current Status: Live Testing PASSED for Claude, Codex, and Session Resume
 
 ### Summary (2026-01-07)
 
@@ -8,25 +8,32 @@
 - PiMonoBackend class implemented in backend.py with event translation
 - magic.py updated with `use_pimono` flag passthrough for `use()`, `register_magic()`, `resume()`
 - cleon.auth() updated to support pi-mono-rust OAuth via `use_pimono=True`
-- **All 14 tests pass (8 unit + 6 live API tests)**
+- **All 17 tests pass (8 unit + 9 live API tests)**
 
 **Live API Testing Results:**
 - ✅ Claude (anthropic) provider: Live test passed
 - ✅ Codex (openai-codex) provider: Live test passed
+- ✅ Session resume across kernel restarts: 3 new tests pass
 - ⏸️ Gemini (google-gemini-cli) provider: PyO3 support added, token expired - needs re-auth
 
-**PyO3 bindings merged with Gemini support:**
-- pi-mono-rust submodule on `madhava/pyo3-bindings` branch
-- Merged `main` (with Gemini provider) into pyo3-bindings branch
+**PyO3 bindings:**
+- PyO3 bindings are located in `pi-mono-rust/src/python/mod.rs`
+- If you need to change anything in pi-mono-rust, make sure to create a branch for it
 - Added `build_gemini_stream_fn()` to PyO3 bindings for google-gemini-cli API
 - PyO3 bindings built and installed via `maturin develop --features python`
 - `pi_mono` Python module imports and works correctly
-- Clippy passes, lib tests pass (77/77)
+- Clippy passes, lib tests pass
+
+**Session Resume Validated:**
+- Session files persist correctly at `~/.pi/agent/sessions/`
+- Session resume via `switch_session(path)` works across backend restarts
+- Session stats are tracked correctly across messages
+- 3 new tests added: `test_session_resume_across_restart`, `test_session_file_persistence`, `test_session_stats_tracking`
 
 ### Next Steps
 1. ~~Run live API tests with Claude and Codex providers~~ ✅ DONE
 2. ~~Test Gemini provider via PiMonoBackend~~ ⏸️ Token expired, code ready
-3. Validate session resume across kernel restarts
+3. ~~Validate session resume across kernel restarts~~ ✅ DONE
 4. Enable PiMonoBackend by default (remove use_pimono flag requirement)
 5. Clean up legacy backends once PiMonoBackend is stable
 
@@ -45,6 +52,15 @@ python -m pytest python/tests/test_pimono_backend.py -v
 
 # Run live tests (requires PIMONO_LIVE_TEST=1 and valid auth)
 PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
+```
+
+### Testing pi CLI Locally
+```bash
+# Test with Claude (Anthropic)
+cd pi-mono-rust && ./pi --provider anthropic --model claude-opus-4-5 --mode json -p "who are you"
+
+# Test with Codex (OpenAI)
+cd pi-mono-rust && ./pi --provider openai-codex --model gpt-5.2-codex --mode json -p "who are you"
 ```
 
 ---
