@@ -107,7 +107,7 @@ class TestPiMonoBackendUnit:
             assert backend_gemini.name == "gemini"
         except RuntimeError as e:
             # Expected if pi_mono not installed, no auth, or provider not supported yet
-            skip_msgs = ["pi_mono is not installed", "No API key", "No model found"]
+            skip_msgs = ["pi_mono is not installed", "No API key", "No model found", "token expired"]
             if any(msg in str(e) for msg in skip_msgs):
                 pytest.skip(f"Skipped: {e}")
             raise
