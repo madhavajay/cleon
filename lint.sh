@@ -10,22 +10,23 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 export UV_VENV_CLEAR=1
 uv venv .venv-lint
+source .venv-lint/bin/activate
 uv pip install -e ./python
 uv pip install pytest ruff mypy vulture
 
 cd "$SCRIPT_DIR/python"
 
 echo "Running ruff format..."
-uv run ruff format .
+ruff format .
 
 echo "Running ruff check with fixes..."
-uv run ruff check . --fix
+ruff check . --fix
 
 echo "Running mypy..."
-uv run mypy .
+mypy .
 
 echo "Running vulture to detect dead code..."
-uv run vulture src tests --min-confidence 80
+vulture src tests --min-confidence 80
 
 # TypeScript/Extension linting
 echo ""

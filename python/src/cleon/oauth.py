@@ -305,7 +305,7 @@ def login_codex_pimono() -> None:
     print("Open the following URL in your browser and authorize cleon:\n")
     print(auth_url)
     print(
-        '\nAfter authorizing, copy the complete authorization code and paste it below.'
+        "\nAfter authorizing, copy the complete authorization code and paste it below."
     )
     print(f"(Expected state for verification: {state[:8]}...)")
     code_input = input("Authorization code: ").strip()
@@ -349,6 +349,4 @@ def login_pimono(provider: str = "claude") -> None:
     elif provider in {"codex", "openai", "openai-codex"}:
         return login_codex_pimono()
     else:
-        raise ValueError(
-            f"Unknown provider '{provider}'. Supported: claude, codex"
-        )
+        raise ValueError(f"Unknown provider '{provider}'. Supported: claude, codex")

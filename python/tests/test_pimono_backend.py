@@ -13,7 +13,6 @@ For unit tests only (no API calls):
 import os
 import pytest
 import threading
-import time
 
 # Skip live tests by default
 LIVE_TEST = os.environ.get("PIMONO_LIVE_TEST", "0") == "1"
@@ -71,8 +70,9 @@ class TestPiMonoBackendUnit:
                 extra_env=None,
                 session_id=None,
             )
-            assert isinstance(backend_claude, PiMonoBackend), \
+            assert isinstance(backend_claude, PiMonoBackend), (
                 "claude should use PiMonoBackend by default"
+            )
             assert backend_claude.name == "claude"
 
             # Test codex
@@ -82,8 +82,9 @@ class TestPiMonoBackendUnit:
                 extra_env=None,
                 session_id=None,
             )
-            assert isinstance(backend_codex, PiMonoBackend), \
+            assert isinstance(backend_codex, PiMonoBackend), (
                 "codex should use PiMonoBackend by default"
+            )
             assert backend_codex.name == "codex"
 
         except RuntimeError as e:
@@ -102,12 +103,18 @@ class TestPiMonoBackendUnit:
                 extra_env=None,
                 session_id=None,
             )
-            assert isinstance(backend_gemini, PiMonoBackend), \
+            assert isinstance(backend_gemini, PiMonoBackend), (
                 "gemini should use PiMonoBackend"
+            )
             assert backend_gemini.name == "gemini"
         except RuntimeError as e:
             # Expected if pi_mono not installed, no auth, or provider not supported yet
-            skip_msgs = ["pi_mono is not installed", "No API key", "No model found", "token expired"]
+            skip_msgs = [
+                "pi_mono is not installed",
+                "No API key",
+                "No model found",
+                "token expired",
+            ]
             if any(msg in str(e) for msg in skip_msgs):
                 pytest.skip(f"Skipped: {e}")
             raise
@@ -311,7 +318,7 @@ class TestPiMonoBackendLive:
             pytest.skip(f"Claude auth not available: {e}")
 
         # Get session ID before prompt
-        session_id_before = backend._session.session_id()
+        _session_id_before = backend._session.session_id()
 
         # Send a prompt
         result, _ = backend.send("Say 'test'")
@@ -380,9 +387,9 @@ class TestPiMonoBackendEventStreaming:
 
         # message events should come before turn_end
         if "message_start" in event_order and "turn_end" in event_order:
-            assert event_order.index("message_start") < event_order.index(
-                "turn_end"
-            ), f"Wrong order: {event_order}"
+            assert event_order.index("message_start") < event_order.index("turn_end"), (
+                f"Wrong order: {event_order}"
+            )
 
         backend.stop()
 
@@ -404,7 +411,9 @@ class TestPiMonoBackendEventStreaming:
 
         # All callbacks should be from the same thread (the one calling send())
         assert len(callback_threads) > 0
-        assert len(set(callback_threads)) == 1, f"Multiple threads: {set(callback_threads)}"
+        assert len(set(callback_threads)) == 1, (
+            f"Multiple threads: {set(callback_threads)}"
+        )
 
         backend.stop()
 
@@ -440,14 +449,20 @@ class TestPiMonoBackendSessionResume:
         assert session_id is not None, "Session ID should be set after first prompt"
 
         # Verify session file exists
-        assert os.path.exists(session_file), f"Session file should exist: {session_file}"
+        assert os.path.exists(session_file), (
+            f"Session file should exist: {session_file}"
+        )
 
         # Stop the backend (simulates kernel shutdown)
         stop_info = backend1.stop()
-        assert stop_info.session_id is not None, "Stop should return session info for resume"
+        assert stop_info.session_id is not None, (
+            "Stop should return session info for resume"
+        )
 
         # Verify session file still exists after stop
-        assert os.path.exists(session_file), f"Session file should persist after stop: {session_file}"
+        assert os.path.exists(session_file), (
+            f"Session file should persist after stop: {session_file}"
+        )
 
         # Step 2: Create new backend and resume the session (simulates kernel restart)
         try:
@@ -463,8 +478,12 @@ class TestPiMonoBackendSessionResume:
         # Verify stats show multiple messages (from both sessions)
         stats = backend2._session.get_session_stats()
         # We should have at least 2 user messages (one from each session)
-        assert stats.get("user_messages", 0) >= 2, f"Should have messages from both sessions. Stats: {stats}"
-        assert stats.get("assistant_messages", 0) >= 2, f"Should have assistant messages from both sessions. Stats: {stats}"
+        assert stats.get("user_messages", 0) >= 2, (
+            f"Should have messages from both sessions. Stats: {stats}"
+        )
+        assert stats.get("assistant_messages", 0) >= 2, (
+            f"Should have assistant messages from both sessions. Stats: {stats}"
+        )
 
         backend2.stop()
 
@@ -479,7 +498,7 @@ class TestPiMonoBackendSessionResume:
             pytest.skip(f"Claude auth not available: {e}")
 
         # Before any prompts, session may or may not have a file
-        initial_file = backend._session.session_file()
+        _initial_file = backend._session.session_file()
 
         # Send a prompt to trigger session file creation
         result, _ = backend.send("Say 'hello'")
@@ -487,8 +506,12 @@ class TestPiMonoBackendSessionResume:
 
         # After prompt, session file should exist
         session_file = backend._session.session_file()
-        assert session_file is not None, "Session file should be created after first prompt"
-        assert os.path.exists(session_file), f"Session file should exist on disk: {session_file}"
+        assert session_file is not None, (
+            "Session file should be created after first prompt"
+        )
+        assert os.path.exists(session_file), (
+            f"Session file should exist on disk: {session_file}"
+        )
 
         # Get stats to verify session is tracking correctly
         stats = backend._session.get_session_stats()
@@ -499,7 +522,9 @@ class TestPiMonoBackendSessionResume:
         backend.stop()
 
         # Verify file still exists after stop
-        assert os.path.exists(session_file), f"Session file should persist after stop: {session_file}"
+        assert os.path.exists(session_file), (
+            f"Session file should persist after stop: {session_file}"
+        )
 
     def test_session_stats_tracking(self):
         """Test that session stats are tracked correctly across messages."""

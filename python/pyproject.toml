@@ -42,6 +42,17 @@ include = [
 [dependency-groups]
 dev = ["types-pygments>=2.19.0.20251121"]
 
+[tool.mypy]
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = "pi_mono.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pi_mono"
+ignore_missing_imports = true
+
 [project.optional-dependencies]
 # This extra is a no-op placeholder to signal an install without Jupyter/extension
 no-jupyter = []
