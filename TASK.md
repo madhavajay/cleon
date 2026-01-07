@@ -1,75 +1,81 @@
 # TASK
 
-## STATUS: ✅ MIGRATION COMPLETE (2026-01-07)
+## STATUS: 🔄 IN PROGRESS - Bundle PyO3 bindings into Cleon
 
-All providers (Codex, Claude, Gemini) now use PiMonoBackend via pi-mono-rust.
-See TODO.md for details on what was completed and remaining future work.
+Move PyO3 bindings from pi-mono-rust into cleon so that `pip install cleon` provides everything in a single package with abi3 (one binary per OS).
 
 ---
 
-## Original Goal (ACHIEVED)
-Rework Cleon to use only the pi-mono-rust library for all providers (Codex, Claude, Gemini) instead of spawning separate CLI processes. The new flow should import pi-mono-rust as a Rust library, provide native subscription support as pi-mono-rust does, and feed the Jupyter prompt pipeline through a unified provider/session interface. Resume, login/auth, and session handling must be consistent across providers.
+## Goal
+
+Restructure the architecture so that:
+- **pi-mono-rust** remains a pure Rust library (port of pi-mono TypeScript)
+- **cleon** is a single Python package that includes:
+  - Python code (backend.py, magic.py, oauth.py, etc.)
+  - Rust PyO3 bindings that wrap pi-mono-rust
+  - Uses abi3 stable ABI (one wheel per OS, not per Python version)
 
 ## Current State (as of 2026-01-07)
-- All providers use unified `PiMonoBackend` in `python/src/cleon/backend.py`
-- Legacy backends removed: `CodexBackend`, `PiBackend`, `GeminiBackend`, `SharedSession`
-- Legacy Rust code removed: `src/main.rs`, `python/cleon/` PyO3 wrapper
-- Login/auth uses pi-mono-rust OAuth (`oauth.py` → `login_pimono()`)
-- Session resume works via `AgentSession.switch_session()`
-- Event streaming validated for all three providers
 
-## Target State (ACHIEVED)
-- ✅ Only pi-mono-rust is used for provider execution (no `pi` CLI and no `gemini` CLI in Cleon).
-- ✅ Removed legacy Codex Rust repo/submodule and its crates.
-- ✅ Codex, Claude, and Gemini all go through a single pi-mono-rust interface.
-- ✅ Jupyter prompt pipeline works with unified backend.
-- ✅ Login/auth and resume are consistent across providers.
-- ✅ Documentation updated to reflect the single provider stack.
+```
+pi-mono-rust/              ← Rust port + PyO3 bindings (mixed)
+  └── src/python/mod.rs    ← PyO3 bindings here (WRONG PLACE)
+python/cleon/              ← Pure Python, imports external pi_mono
+```
 
-## Remaining Future Work (Not Blocking)
-- Tool approval hooks: Wire `on_approval` callback in `PiMonoBackend.send()`
-- See TODO.md for details
+**Problem:** Users must run `maturin develop` in pi-mono-rust separately before cleon works.
+
+## Target State
+
+```
+pi-mono-rust/              ← Pure Rust library (NO PyO3)
+  └── src/lib.rs           ← Exports Rust API only
+python/
+  ├── rust/
+  │   ├── Cargo.toml       ← Depends on pi crate, uses PyO3 + abi3
+  │   └── src/lib.rs       ← PyO3 bindings (moved from pi-mono-rust)
+  ├── src/cleon/           ← Python code
+  │   └── _native/         ← Imports from compiled Rust
+  └── pyproject.toml       ← maturin build with abi3
+```
+
+**Result:** `pip install cleon` gives you everything. One wheel per OS.
 
 ---
 
 ## Reference Information
 
-Rules for pi-mono-rust changes
-- If you need to change pi-mono-rust, create a branch inside the submodule and make changes there.
-- Do not modify the TypeScript pi-mono sources; only the Rust port.
+### Rules for pi-mono-rust changes
+- Keep pi-mono-rust as a pure Rust port of pi-mono TypeScript
+- No PyO3 code in pi-mono-rust after this refactor
+- Do not modify the TypeScript pi-mono sources; only the Rust port
 - If you need to reference unported behavior, init the TS submodule for reading only:
   `git submodule update --init pi-mono`
 
-Execution checklist (every loop)
-- Read this TASK.md and TODO.md at startup.
-- Do the next most important item in TODO.md.
-- Update TODO.md to reflect progress and next steps.
-- Run tests relevant to what you changed (see below) before committing.
-- Commit after each working feature with a descriptive message.
-- Update `pi-mono-rust/docs/rust-port-plan.md` "Current Rust Status" section when pi-mono-rust changes.
+### Execution checklist (every loop)
+- Read this TASK.md and TODO.md at startup
+- Do the next most important item in TODO.md
+- Update TODO.md to reflect progress and next steps
+- Run tests before committing: `./lint.sh`, `./test-live.sh`
+- Commit after each working feature with a descriptive message
 
-Tests to run before commit
-- Always: `./clippy.sh`
-- If touching pi-mono-rust: run its Rust tests (`cargo test` in `pi-mono-rust` or `pi-mono-rust/rs-test.sh`).
-- If touching Cleon Python: run relevant Python tests or smoke-check Jupyter integration.
+### Tests to run before commit
+- `./lint.sh` - Python linting (ruff, mypy, vulture)
+- `./test-live.sh` - Live API tests (requires auth)
+- If touching pi-mono-rust: `cargo test` in pi-mono-rust
 
-Git etiquette
-- Do not commit temp/debug files.
-- Run `./clippy.sh` before committing.
-- Update `pi-mono-rust/docs/rust-port-plan.md` "Current Rust Status" section.
-- Commit after each working feature with descriptive message.
-- Do not co-author commits or commit .claude or other agent cruft.
+### Git etiquette
+- Do not commit temp/debug files
+- Commit after each working feature with descriptive message
+- Do not co-author commits or commit .claude or other agent cruft
 
-Refactoring rules
-- Have tests passing BEFORE refactoring.
-- Copy code to new location first, then delete from old.
-- Keep functionality identical - no "improvements" during refactor.
-- Run tests after each move.
+### Refactoring rules
+- Have tests passing BEFORE refactoring
+- Copy code to new location first, then delete from old
+- Keep functionality identical - no "improvements" during refactor
+- Run tests after each move
 
-DO NOT
-- Add features not in the TS version.
-- Skip tests to move faster.
-- Let main.rs grow past 500 lines.
-- Implement streaming without tests.
-
-As you start to understand more about the task you can update the bottom of this file
+### DO NOT
+- Add features not in the TS version to pi-mono-rust
+- Skip tests to move faster
+- Break existing functionality during the migration
