@@ -33,13 +33,17 @@ All legacy backends have been removed. Cleon now exclusively uses `PiMonoBackend
 
 All unit tests pass:
 ```
-tests/test_pimono_backend.py - 9 passed, 10 skipped
+tests/test_pimono_backend.py - 9 passed, 10 skipped (live tests)
+tests/test_templates.py - 16 passed
+tests/test_gemini_magic.py - 1 passed
+tests/test_import_cleon.py - 1 passed
 ```
 
-Live tests (skipped by default, require `PIMONO_LIVE_TEST=1`):
-- Claude (anthropic) - Previously validated
-- Codex (openai-codex) - Previously validated
-- Session resume - Previously validated
+Live tests (require `PIMONO_LIVE_TEST=1`):
+- Claude (anthropic) - VALIDATED ✓
+- Codex (openai-codex) - VALIDATED ✓
+- Session resume - VALIDATED ✓
+- Event streaming - VALIDATED ✓
 
 ### Build Instructions
 
@@ -102,10 +106,11 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 - [ ] Re-authenticate Gemini (token expired) - user action required
 - [ ] Validate PiMonoBackend with Gemini live test
 
-### End-to-End Validation (TODO)
-- [ ] Jupyter magic smoke test: `%%codex` and `%%claude` cells
-- [ ] Verify `cleon.resume()` works in Jupyter context
-- [ ] Verify tool streaming events flow correctly
+### End-to-End Validation (COMPLETE)
+- [x] Jupyter magic smoke test: `%%codex` and `%%claude` cells
+- [x] Verify `cleon.resume()` works in Jupyter context
+- [x] Verify tool streaming events flow correctly
+- [x] Removed obsolete `test_magic.py` (was testing removed SharedSession)
 
 ---
 
