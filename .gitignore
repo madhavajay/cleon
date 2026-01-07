@@ -17,3 +17,4 @@ python/src/cleon/bin/*
 **/.yarn/*
 **/node_modules/*
 **/build_log.json
+AGENTS.md

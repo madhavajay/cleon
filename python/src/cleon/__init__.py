@@ -26,7 +26,7 @@ from .magic import (
 from .backend import SharedSession
 from . import autoroute
 from .settings import settings as settings_store, _UNSET as _SETTINGS_UNSET
-from .oauth import login_claude
+from .oauth import login_claude, login_pimono
 
 __all__ = [
     "auth",
@@ -328,8 +328,13 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
     return stop_session(agent=agent, force=force)
 
 
-def resume(agent: str = "codex", session_id: str | None = None) -> str | None:
-    return resume_session(agent=agent, session_id=session_id)
+def resume(
+    agent: str = "codex",
+    session_id: str | None = None,
+    *,
+    use_pimono: bool = False,
+) -> str | None:
+    return resume_session(agent=agent, session_id=session_id, use_pimono=use_pimono)
 
 
 def status() -> dict[str, object]:
@@ -360,15 +365,33 @@ def sessions():
     return list_sessions()
 
 
-def login(agent: str = "claude"):
+def login(agent: str = "claude", *, use_pimono: bool = False):
+    """Login to an agent provider.
+
+    Args:
+        agent: Provider name ("claude", "codex", etc.)
+        use_pimono: If True, use pi-mono-rust OAuth functions
+    """
+    if use_pimono:
+        return login_pimono(agent)
     if agent.lower() in {"claude", "anthropic", "pi"}:
         return login_claude()
     raise ValueError(f"Unknown agent '{agent}'.")
 
 
-def auth(provider: str | None = None) -> None:
-    """Authenticate with the specified provider (defaults to claude/pi)."""
+def auth(provider: str | None = None, *, use_pimono: bool = False) -> None:
+    """Authenticate with the specified provider (defaults to claude/pi).
+
+    Args:
+        provider: Provider name ("claude", "codex", etc.)
+        use_pimono: If True, use pi-mono-rust OAuth functions for unified auth.
+            This is recommended for PiMonoBackend usage.
+    """
     provider = provider or "claude"
+
+    if use_pimono:
+        return login_pimono(provider)
+
     if provider.lower() in {"claude", "anthropic", "pi"}:
         return login_claude()
     elif provider.lower() == "codex":

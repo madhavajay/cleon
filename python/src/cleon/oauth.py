@@ -185,3 +185,170 @@ def _refresh_active_claude_backend() -> None:
             except Exception:
                 pass
         break
+
+
+def _refresh_active_codex_backend() -> None:
+    """If a Codex backend is already loaded, restart it to pick up the new tokens."""
+    try:
+        from . import magic  # Lazy import to avoid circular imports at module load
+    except Exception:
+        return
+    for key in ("codex", "openai-codex"):
+        backend = getattr(magic, "_BACKENDS", {}).get(key)  # type: ignore[attr-defined]
+        if backend is None:
+            continue
+        restart = getattr(backend, "restart", None)
+        if callable(restart):
+            try:
+                restart()
+                print("Refreshed Codex backend with new credentials.")
+            except Exception:
+                pass
+        break
+
+
+# ============================================================================
+# pi-mono-rust based OAuth functions (recommended)
+# ============================================================================
+
+
+def _check_pimono_available() -> bool:
+    """Check if pi_mono is available for OAuth operations."""
+    try:
+        import pi_mono  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def login_claude_pimono() -> None:
+    """Interactive OAuth login for Claude Pro/Max using pi-mono-rust.
+
+    This function uses the pi-mono-rust library for OAuth, providing consistent
+    auth handling across all providers.
+    """
+    try:
+        from pi_mono import (
+            AuthStorage,
+            anthropic_exchange_code,
+            anthropic_get_auth_url,
+            get_agent_dir,
+        )
+    except ImportError:
+        print(
+            "pi_mono not installed. Install pi-mono-rust with Python bindings or use login_claude()."
+        )
+        return
+
+    # Get auth URL and verifier
+    auth_url, verifier = anthropic_get_auth_url()
+    print("Open the following URL in your browser and authorize cleon:\n")
+    print(auth_url)
+    print(
+        '\nAfter authorizing, copy the complete "code#state" value and paste it below.'
+    )
+    code_input = input("Authorization response (code#state): ").strip()
+    if not code_input:
+        print("Login cancelled.")
+        return
+    if "#" not in code_input:
+        print("Invalid response. Expected format: <code>#<state>")
+        return
+    code, _ = code_input.split("#", 1)
+
+    # Exchange code for credentials
+    try:
+        creds = anthropic_exchange_code(code, verifier)
+    except RuntimeError as e:
+        print(f"OAuth token exchange failed: {e}")
+        print("If this keeps failing, set ANTHROPIC_API_KEY directly to skip OAuth.")
+        return
+
+    # Store credentials using pi-mono-rust AuthStorage
+    auth_path = Path(get_agent_dir()) / "auth.json"
+    auth = AuthStorage(str(auth_path))
+    auth.set(
+        "anthropic",
+        {
+            "type": "oauth",
+            "access": creds.get("access"),
+            "refresh": creds.get("refresh"),
+            "expires": creds.get("expires"),
+        },
+    )
+    print(f"Claude login successful. Tokens stored in {auth_path}")
+    _refresh_active_claude_backend()
+
+
+def login_codex_pimono() -> None:
+    """Interactive OAuth login for OpenAI Codex using pi-mono-rust.
+
+    This function uses the pi-mono-rust library for OAuth, providing consistent
+    auth handling across all providers.
+    """
+    try:
+        from pi_mono import (
+            AuthStorage,
+            get_agent_dir,
+            openai_codex_exchange_code,
+            openai_codex_get_auth_url,
+        )
+    except ImportError:
+        print(
+            "pi_mono not installed. Install pi-mono-rust with Python bindings or use native Codex auth."
+        )
+        return
+
+    # Get auth URL, verifier, and state
+    auth_url, verifier, state = openai_codex_get_auth_url()
+    print("Open the following URL in your browser and authorize cleon:\n")
+    print(auth_url)
+    print(
+        '\nAfter authorizing, copy the complete authorization code and paste it below.'
+    )
+    print(f"(Expected state for verification: {state[:8]}...)")
+    code_input = input("Authorization code: ").strip()
+    if not code_input:
+        print("Login cancelled.")
+        return
+
+    # Exchange code for credentials
+    try:
+        creds = openai_codex_exchange_code(code_input, verifier)
+    except RuntimeError as e:
+        print(f"OAuth token exchange failed: {e}")
+        print("If this keeps failing, set OPENAI_API_KEY directly to skip OAuth.")
+        return
+
+    # Store credentials using pi-mono-rust AuthStorage
+    auth_path = Path(get_agent_dir()) / "auth.json"
+    auth = AuthStorage(str(auth_path))
+    auth.set(
+        "openai-codex",
+        {
+            "type": "oauth",
+            "access": creds.get("access"),
+            "refresh": creds.get("refresh"),
+            "expires": creds.get("expires"),
+        },
+    )
+    print(f"Codex login successful. Tokens stored in {auth_path}")
+    _refresh_active_codex_backend()
+
+
+def login_pimono(provider: str = "claude") -> None:
+    """Unified OAuth login using pi-mono-rust.
+
+    Args:
+        provider: "claude" (or "anthropic") for Claude, "codex" for OpenAI Codex
+    """
+    provider = provider.lower()
+    if provider in {"claude", "anthropic", "pi"}:
+        return login_claude_pimono()
+    elif provider in {"codex", "openai", "openai-codex"}:
+        return login_codex_pimono()
+    else:
+        raise ValueError(
+            f"Unknown provider '{provider}'. Supported: claude, codex"
+        )
