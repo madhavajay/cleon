@@ -8,15 +8,12 @@ cd "$SCRIPT_DIR/python"
 uv venv --allow-existing
 source .venv/bin/activate
 
-# Build pi_mono from pi-mono-rust
-echo "Building pi_mono from pi-mono-rust..."
-cd "$SCRIPT_DIR/pi-mono-rust"
+# Build cleon (includes PyO3 bindings via maturin)
+echo "Building cleon..."
 uv pip install maturin
-maturin develop --features python
+maturin develop
 
-# Install cleon and run tests
-cd "$SCRIPT_DIR/python"
-uv pip install -e .
+# Install test dependencies
 uv pip install pytest
 
 echo "Running live tests..."
