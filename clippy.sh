@@ -9,8 +9,6 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo fmt -p cleon
-cargo fmt --manifest-path "$ROOT/python/cleon/Cargo.toml"
-
-cargo clippy -p cleon --all-targets --all-features -- -D warnings
-cargo clippy --manifest-path "$ROOT/python/cleon/Cargo.toml" --all-targets --all-features -- -D warnings
+# All Rust code is now in pi-mono-rust submodule
+# Legacy src/main.rs and python/cleon/ have been removed
+"$ROOT/pi-mono-rust/clippy.sh"

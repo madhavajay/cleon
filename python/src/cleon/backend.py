@@ -53,7 +53,9 @@ _PROVIDER_ALIASES: dict[str, str] = {
     "default": "openai-codex",
     "claude": "anthropic",
     "anthropic": "anthropic",
-    "gemini": "google",
+    "gemini": "google-gemini-cli",
+    "google": "google-gemini-cli",
+    "google-gemini-cli": "google-gemini-cli",
 }
 
 

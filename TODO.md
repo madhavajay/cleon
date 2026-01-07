@@ -91,15 +91,16 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 
 ## Remaining Work
 
-### Documentation Updates (TODO)
-- [ ] Update README with new architecture
-- [ ] Document single provider stack
-- [ ] Update installation instructions
+### Documentation Updates (COMPLETE)
+- [x] Update README with new architecture
+- [x] Document single provider stack
+- [x] Update installation instructions
 
-### Gemini Support (PENDING)
-- [ ] Re-authenticate Gemini (token expired)
-- [ ] Validate PiMonoBackend with Gemini provider
-- [ ] pi-mono-rust may need "google" provider model support
+### Gemini Support (READY)
+- [x] Fixed provider alias: "gemini" -> "google-gemini-cli" (matches model registry)
+- [x] pi-mono-rust has full google-gemini-cli streaming support
+- [ ] Re-authenticate Gemini (token expired) - user action required
+- [ ] Validate PiMonoBackend with Gemini live test
 
 ### End-to-End Validation (TODO)
 - [ ] Jupyter magic smoke test: `%%codex` and `%%claude` cells
@@ -133,7 +134,9 @@ _PROVIDER_ALIASES = {
     "default": "openai-codex",
     "claude": "anthropic",
     "anthropic": "anthropic",
-    "gemini": "google",
+    "gemini": "google-gemini-cli",
+    "google": "google-gemini-cli",
+    "google-gemini-cli": "google-gemini-cli",
 }
 ```
 
