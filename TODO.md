@@ -33,7 +33,7 @@ All legacy backends have been removed. Cleon now exclusively uses `PiMonoBackend
 
 All unit tests pass:
 ```
-tests/test_pimono_backend.py - 9 passed, 10 skipped (live tests)
+tests/test_pimono_backend.py - 10 passed, 9 skipped (live tests)
 tests/test_templates.py - 16 passed
 tests/test_gemini_magic.py - 1 passed
 tests/test_import_cleon.py - 1 passed
@@ -42,6 +42,7 @@ tests/test_import_cleon.py - 1 passed
 Live tests (require `PIMONO_LIVE_TEST=1`):
 - Claude (anthropic) - VALIDATED ✓
 - Codex (openai-codex) - VALIDATED ✓
+- Gemini (google-gemini-cli) - VALIDATED ✓
 - Session resume - VALIDATED ✓
 - Event streaming - VALIDATED ✓
 
@@ -100,11 +101,12 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 - [x] Document single provider stack
 - [x] Update installation instructions
 
-### Gemini Support (READY)
+### Gemini Support (COMPLETE)
 - [x] Fixed provider alias: "gemini" -> "google-gemini-cli" (matches model registry)
 - [x] pi-mono-rust has full google-gemini-cli streaming support
-- [ ] Re-authenticate Gemini (token expired) - user action required
-- [ ] Validate PiMonoBackend with Gemini live test
+- [x] Fixed auth check to detect `~/.gemini/oauth_creds.json` credentials
+- [x] Fixed JSON parsing for float expiry_date field in Gemini CLI creds
+- [x] Validate PiMonoBackend with Gemini live test - WORKING ✓
 
 ### End-to-End Validation (COMPLETE)
 - [x] Jupyter magic smoke test: `%%codex` and `%%claude` cells
