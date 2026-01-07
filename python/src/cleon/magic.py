@@ -195,16 +195,8 @@ def use(
     session_id: str | None = None,
     ipython=None,
     quiet: bool = False,
-    use_pimono: bool | None = None,
 ) -> Callable[[str, str | None], Any]:
-    """High-level helper to expose ``%%name`` in the current IPython shell.
-
-    Args:
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers;
-            if False, use legacy CLI-based backends; if None (default), auto-select
-            PiMonoBackend for claude/codex with fallback to legacy. This provides
-            unified session handling and auth across Codex, Claude, and Gemini.
-    """
+    """High-level helper to expose ``%%name`` in the current IPython shell."""
 
     if agent and name == "codex":
         name = agent
@@ -229,7 +221,6 @@ def use(
         session_id=session_id,
         ipython=ipython,
         quiet=quiet,
-        use_pimono=use_pimono,
     )
     return None  # type: ignore[return-value]
 
@@ -697,15 +688,8 @@ def register_magic(
     session_id: str | None = None,
     ipython=None,
     quiet: bool = False,
-    use_pimono: bool | None = None,
 ) -> Callable[[str, str | None], Any]:
-    """Register the ``%%name`` cell magic for cleon.
-
-    Args:
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers;
-            if False, use legacy CLI-based backends; if None (default), auto-select
-            PiMonoBackend for claude/codex with fallback to legacy.
-    """
+    """Register the ``%%name`` cell magic for cleon."""
 
     ip = _ensure_ipython(ipython)
     normalized = name.lower()
@@ -721,7 +705,6 @@ def register_magic(
         binary=binary,
         extra_env=env,
         session_id=session_id,
-        use_pimono=use_pimono,
     )
     _register_backend(normalized, backend)
     agent_prefix = get_agent_prefix(backend_name)
@@ -1094,16 +1077,12 @@ def status() -> dict[str, Any]:
 def resume(
     agent: str = "codex",
     session_id: str | None = None,
-    *,
-    use_pimono: bool | None = None,
 ) -> str | None:
     """Resume a saved cleon session (defaults to current notebook entry).
 
     Args:
         agent: Agent name (codex, claude, gemini)
         session_id: Explicit session ID to resume
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust); if False, use legacy;
-            if None (default), auto-select PiMonoBackend for claude/codex.
     """
 
     agent = _default_agent_name(agent)
@@ -1141,7 +1120,7 @@ def resume(
         if human_time:
             msg += f" from {human_time}"
         print(msg)
-    use(agent, agent=agent, session_id=sid, use_pimono=use_pimono)
+    use(agent, agent=agent, session_id=sid)
     return sid
 
 

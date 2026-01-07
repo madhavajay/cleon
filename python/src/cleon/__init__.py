@@ -1,11 +1,10 @@
-"""Python helpers for the codex CLI bindings."""
+"""Python helpers for Cleon - Jupyter notebook agent interface."""
 
 from __future__ import annotations
 
 import importlib.util
 import os
 
-from ._cleon import auth as _codex_auth, run  # type: ignore[import-not-found]  # Re-export PyO3 bindings
 from .magic import (
     load_ipython_extension,
     register_codex_magic,
@@ -23,14 +22,12 @@ from .magic import (
     sessions as list_sessions,
     refresh_auto_route,
 )
-from .backend import SharedSession
 from . import autoroute
 from .settings import settings as settings_store, _UNSET as _SETTINGS_UNSET
-from .oauth import login_claude, login_pimono
+from .oauth import login_pimono
 
 __all__ = [
     "auth",
-    "run",
     "register_magic",
     "register_codex_magic",
     "use",
@@ -48,7 +45,6 @@ __all__ = [
     "load_ipython_extension",
     "history_magic",
     "help",
-    "SharedSession",
     "install_extension",
     "has_extension",
     "check_extension",
@@ -331,10 +327,8 @@ def stop(agent: str | None = None, *, force: bool = False) -> str | None:
 def resume(
     agent: str = "codex",
     session_id: str | None = None,
-    *,
-    use_pimono: bool = False,
 ) -> str | None:
-    return resume_session(agent=agent, session_id=session_id, use_pimono=use_pimono)
+    return resume_session(agent=agent, session_id=session_id)
 
 
 def status() -> dict[str, object]:
@@ -365,39 +359,25 @@ def sessions():
     return list_sessions()
 
 
-def login(agent: str = "claude", *, use_pimono: bool = False):
+def login(agent: str = "claude"):
     """Login to an agent provider.
 
     Args:
         agent: Provider name ("claude", "codex", etc.)
-        use_pimono: If True, use pi-mono-rust OAuth functions
     """
-    if use_pimono:
-        return login_pimono(agent)
-    if agent.lower() in {"claude", "anthropic", "pi"}:
-        return login_claude()
-    raise ValueError(f"Unknown agent '{agent}'.")
+    return login_pimono(agent)
 
 
-def auth(provider: str | None = None, *, use_pimono: bool = False) -> None:
-    """Authenticate with the specified provider (defaults to claude/pi).
+def auth(provider: str | None = None) -> None:
+    """Authenticate with the specified provider (defaults to claude).
 
     Args:
-        provider: Provider name ("claude", "codex", etc.)
-        use_pimono: If True, use pi-mono-rust OAuth functions for unified auth.
-            This is recommended for PiMonoBackend usage.
+        provider: Provider name ("claude", "codex", "gemini", etc.)
+
+    All authentication goes through pi-mono-rust's unified auth system.
     """
     provider = provider or "claude"
-
-    if use_pimono:
-        return login_pimono(provider)
-
-    if provider.lower() in {"claude", "anthropic", "pi"}:
-        return login_claude()
-    elif provider.lower() == "codex":
-        return _codex_auth(provider)
-    else:
-        raise ValueError(f"Unknown provider '{provider}'. Supported: claude, codex")
+    return login_pimono(provider)
 
 
 _AUTO_INITIALIZED = False

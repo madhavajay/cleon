@@ -38,18 +38,16 @@ class TestPiMonoBackendUnit:
         assert _PROVIDER_ALIASES["anthropic"] == "anthropic"
         assert _PROVIDER_ALIASES["default"] == "openai-codex"
 
-    def test_resolve_backend_with_use_pimono(self):
-        """Test that resolve_backend returns PiMonoBackend when use_pimono=True."""
+    def test_resolve_backend_returns_pimono(self):
+        """Test that resolve_backend always returns PiMonoBackend."""
         from cleon.backend import resolve_backend, PiMonoBackend
 
         # This may fail if pi_mono is not installed or no auth
         try:
             backend = resolve_backend(
                 agent="claude",
-                binary=None,
                 extra_env=None,
                 session_id=None,
-                use_pimono=True,
             )
             assert isinstance(backend, PiMonoBackend)
             assert backend.name == "claude"
@@ -94,37 +92,25 @@ class TestPiMonoBackendUnit:
                 pytest.skip(f"Skipped: {e}")
             raise
 
-    def test_resolve_backend_explicit_legacy(self):
-        """Test that resolve_backend uses legacy backends when use_pimono=False."""
-        from cleon.backend import resolve_backend, PiBackend, CodexBackend, GeminiBackend
-
-        # Test that use_pimono=False forces legacy backends (may fail if legacy deps missing)
-        try:
-            backend_claude = resolve_backend(
-                agent="claude",
-                binary=None,
-                extra_env=None,
-                session_id=None,
-                use_pimono=False,
-            )
-            assert isinstance(backend_claude, PiBackend), \
-                "claude with use_pimono=False should use PiBackend"
-        except RuntimeError:
-            # May fail if legacy pi CLI not available
-            pass
+    def test_resolve_backend_gemini_uses_pimono(self):
+        """Test that resolve_backend uses PiMonoBackend for gemini."""
+        from cleon.backend import resolve_backend, PiMonoBackend
 
         try:
             backend_gemini = resolve_backend(
                 agent="gemini",
-                binary=None,
                 extra_env=None,
                 session_id=None,
             )
-            assert isinstance(backend_gemini, GeminiBackend), \
-                "gemini should use GeminiBackend (legacy)"
-        except RuntimeError:
-            # May fail if legacy gemini CLI not available
-            pass
+            assert isinstance(backend_gemini, PiMonoBackend), \
+                "gemini should use PiMonoBackend"
+            assert backend_gemini.name == "gemini"
+        except RuntimeError as e:
+            # Expected if pi_mono not installed, no auth, or provider not supported yet
+            skip_msgs = ["pi_mono is not installed", "No API key", "No model found"]
+            if any(msg in str(e) for msg in skip_msgs):
+                pytest.skip(f"Skipped: {e}")
+            raise
 
     def test_event_translation(self):
         """Test that events are translated correctly."""

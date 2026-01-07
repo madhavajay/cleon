@@ -63,3 +63,5 @@ DO NOT
 - Skip tests to move faster.
 - Let main.rs grow past 500 lines.
 - Implement streaming without tests.
+
+As you start to understand more about the task you can update the bottom of this file
