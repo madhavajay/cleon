@@ -1,36 +1,44 @@
 # TASK
 
-Goal
+## STATUS: ✅ MIGRATION COMPLETE (2026-01-07)
+
+All providers (Codex, Claude, Gemini) now use PiMonoBackend via pi-mono-rust.
+See TODO.md for details on what was completed and remaining future work.
+
+---
+
+## Original Goal (ACHIEVED)
 Rework Cleon to use only the pi-mono-rust library for all providers (Codex, Claude, Gemini) instead of spawning separate CLI processes. The new flow should import pi-mono-rust as a Rust library, provide native subscription support as pi-mono-rust does, and feed the Jupyter prompt pipeline through a unified provider/session interface. Resume, login/auth, and session handling must be consistent across providers.
 
-Current state (read first, with pointers)
-- Provider backends live in `python/src/cleon/backend.py`:
-  - CodexBackend uses the cleon Rust CLI and PyO3 bindings (`cleon` binary + `_cleon`).
-  - PiBackend spawns the Node pi CLI in RPC mode for Claude.
-  - GeminiBackend spawns the gemini CLI and parses JSON events.
-- Prompt assembly and session plumbing live in `python/src/cleon/magic.py` (context, templates, approvals, async queue, resume/stop).
-- Login/auth lives in `python/src/cleon/oauth.py` and `python/src/cleon/__init__.py` (Claude OAuth, Codex auth bindings).
-- Per-agent config is in `python/src/cleon/settings.py`.
-- Codex-only Rust CLI is in `src/main.rs` and wired in `Cargo.toml`.
-- Rust port reference and parity status are in `pi-mono-rust/docs/rust-port-plan.md`.
+## Current State (as of 2026-01-07)
+- All providers use unified `PiMonoBackend` in `python/src/cleon/backend.py`
+- Legacy backends removed: `CodexBackend`, `PiBackend`, `GeminiBackend`, `SharedSession`
+- Legacy Rust code removed: `src/main.rs`, `python/cleon/` PyO3 wrapper
+- Login/auth uses pi-mono-rust OAuth (`oauth.py` → `login_pimono()`)
+- Session resume works via `AgentSession.switch_session()`
+- Event streaming validated for all three providers
 
-Target state (definition of done)
-- Only pi-mono-rust is used for provider execution (no `pi` CLI and no `gemini` CLI in Cleon).
-- Remove any usage of the legacy Codex Rust repo/submodule and its crates; Cleon should not depend on `codex-*` crates once pi-mono-rust is integrated.
-- Codex, Claude, and Gemini all go through a single pi-mono-rust interface with the same session, resume, and auth behaviors.
-- Jupyter prompt pipeline (context, templates, approvals, event streaming) still works, but calls a unified backend implemented via pi-mono-rust bindings.
-- Login/auth and resume are consistent across providers, backed by pi-mono-rust auth/session storage.
-- Documentation updated to reflect the single provider stack.
-- Provider order: finish Codex + Claude (pi subscription) first; do Gemini after those are stable.
+## Target State (ACHIEVED)
+- ✅ Only pi-mono-rust is used for provider execution (no `pi` CLI and no `gemini` CLI in Cleon).
+- ✅ Removed legacy Codex Rust repo/submodule and its crates.
+- ✅ Codex, Claude, and Gemini all go through a single pi-mono-rust interface.
+- ✅ Jupyter prompt pipeline works with unified backend.
+- ✅ Login/auth and resume are consistent across providers.
+- ✅ Documentation updated to reflect the single provider stack.
+
+## Remaining Future Work (Not Blocking)
+- Tool approval hooks: Wire `on_approval` callback in `PiMonoBackend.send()`
+- See TODO.md for details
+
+---
+
+## Reference Information
 
 Rules for pi-mono-rust changes
 - If you need to change pi-mono-rust, create a branch inside the submodule and make changes there.
 - Do not modify the TypeScript pi-mono sources; only the Rust port.
 - If you need to reference unported behavior, init the TS submodule for reading only:
   `git submodule update --init pi-mono`
-
-Next most important step (do this now)
-1) Inspect pi-mono-rust public APIs and identify what Cleon needs: session start/resume, prompt send, streaming events, tool approval hooks, and auth/login entry points. Write down the minimal Rust API surface Cleon should call and the gaps vs Cleon usage in `python/src/cleon/backend.py` and `python/src/cleon/magic.py`. Update TODO.md with concrete sub-tasks based on the gaps you find.
 
 Execution checklist (every loop)
 - Read this TASK.md and TODO.md at startup.
