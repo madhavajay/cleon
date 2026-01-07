@@ -59,6 +59,73 @@ class TestPiMonoBackendUnit:
                 pytest.skip(f"Skipped: {e}")
             raise
 
+    def test_resolve_backend_default_uses_pimono(self):
+        """Test that resolve_backend uses PiMonoBackend by default for claude/codex."""
+        from cleon.backend import resolve_backend, PiMonoBackend
+
+        # With pi_mono installed and auth available, resolve_backend should
+        # automatically use PiMonoBackend for claude and codex
+        try:
+            # Test claude
+            backend_claude = resolve_backend(
+                agent="claude",
+                binary=None,
+                extra_env=None,
+                session_id=None,
+            )
+            assert isinstance(backend_claude, PiMonoBackend), \
+                "claude should use PiMonoBackend by default"
+            assert backend_claude.name == "claude"
+
+            # Test codex
+            backend_codex = resolve_backend(
+                agent="codex",
+                binary=None,
+                extra_env=None,
+                session_id=None,
+            )
+            assert isinstance(backend_codex, PiMonoBackend), \
+                "codex should use PiMonoBackend by default"
+            assert backend_codex.name == "codex"
+
+        except RuntimeError as e:
+            # Expected if pi_mono not installed or no auth
+            if "pi_mono is not installed" in str(e) or "No API key" in str(e):
+                pytest.skip(f"Skipped: {e}")
+            raise
+
+    def test_resolve_backend_explicit_legacy(self):
+        """Test that resolve_backend uses legacy backends when use_pimono=False."""
+        from cleon.backend import resolve_backend, PiBackend, CodexBackend, GeminiBackend
+
+        # Test that use_pimono=False forces legacy backends (may fail if legacy deps missing)
+        try:
+            backend_claude = resolve_backend(
+                agent="claude",
+                binary=None,
+                extra_env=None,
+                session_id=None,
+                use_pimono=False,
+            )
+            assert isinstance(backend_claude, PiBackend), \
+                "claude with use_pimono=False should use PiBackend"
+        except RuntimeError:
+            # May fail if legacy pi CLI not available
+            pass
+
+        try:
+            backend_gemini = resolve_backend(
+                agent="gemini",
+                binary=None,
+                extra_env=None,
+                session_id=None,
+            )
+            assert isinstance(backend_gemini, GeminiBackend), \
+                "gemini should use GeminiBackend (legacy)"
+        except RuntimeError:
+            # May fail if legacy gemini CLI not available
+            pass
+
     def test_event_translation(self):
         """Test that events are translated correctly."""
         from cleon.backend import _translate_pimono_event

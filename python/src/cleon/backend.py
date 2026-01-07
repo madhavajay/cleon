@@ -1355,7 +1355,7 @@ def resolve_backend(
     binary: str | None,
     extra_env: Mapping[str, str] | None,
     session_id: str | None,
-    use_pimono: bool = False,
+    use_pimono: bool | None = None,
 ) -> AgentBackend:
     """Resolve which backend to use for the given agent.
 
@@ -1364,22 +1364,33 @@ def resolve_backend(
         binary: Explicit binary path (legacy, ignored for PiMonoBackend)
         extra_env: Extra environment variables
         session_id: Session ID to resume
-        use_pimono: If True, use PiMonoBackend for all agents
+        use_pimono: If True, use PiMonoBackend; if False, use legacy backends;
+            if None (default), use PiMonoBackend for claude/codex with fallback to legacy.
 
     Returns:
         An AgentBackend instance.
     """
     agent_name = agent.lower()
 
-    # If use_pimono is requested, use unified backend
-    if use_pimono:
-        return PiMonoBackend(
-            agent=agent_name,
-            extra_env=extra_env,
-            session_id=session_id,
-        )
+    # Determine if we should try PiMonoBackend
+    try_pimono = use_pimono is True or (
+        use_pimono is None and agent_name in {"codex", "default", "claude", "anthropic"}
+    )
 
-    # Otherwise, use legacy backends
+    if try_pimono:
+        try:
+            return PiMonoBackend(
+                agent=agent_name,
+                extra_env=extra_env,
+                session_id=session_id,
+            )
+        except RuntimeError:
+            # Fall back to legacy if PiMonoBackend fails (e.g., pi_mono not installed)
+            if use_pimono is True:
+                raise  # Re-raise if explicitly requested
+            # Otherwise fall through to legacy backends
+
+    # Legacy backends
     if agent_name in {"codex", "default"}:
         return CodexBackend(binary=binary, extra_env=extra_env, session_id=session_id)
     if agent_name in {"claude", "anthropic"}:

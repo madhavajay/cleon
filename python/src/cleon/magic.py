@@ -195,14 +195,15 @@ def use(
     session_id: str | None = None,
     ipython=None,
     quiet: bool = False,
-    use_pimono: bool = False,
+    use_pimono: bool | None = None,
 ) -> Callable[[str, str | None], Any]:
     """High-level helper to expose ``%%name`` in the current IPython shell.
 
     Args:
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers
-            instead of the legacy CLI-based backends. This provides unified
-            session handling and auth across Codex, Claude, and Gemini.
+        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers;
+            if False, use legacy CLI-based backends; if None (default), auto-select
+            PiMonoBackend for claude/codex with fallback to legacy. This provides
+            unified session handling and auth across Codex, Claude, and Gemini.
     """
 
     if agent and name == "codex":
@@ -696,13 +697,14 @@ def register_magic(
     session_id: str | None = None,
     ipython=None,
     quiet: bool = False,
-    use_pimono: bool = False,
+    use_pimono: bool | None = None,
 ) -> Callable[[str, str | None], Any]:
     """Register the ``%%name`` cell magic for cleon.
 
     Args:
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers
-            instead of the legacy CLI-based backends.
+        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for all providers;
+            if False, use legacy CLI-based backends; if None (default), auto-select
+            PiMonoBackend for claude/codex with fallback to legacy.
     """
 
     ip = _ensure_ipython(ipython)
@@ -1093,14 +1095,15 @@ def resume(
     agent: str = "codex",
     session_id: str | None = None,
     *,
-    use_pimono: bool = False,
+    use_pimono: bool | None = None,
 ) -> str | None:
     """Resume a saved cleon session (defaults to current notebook entry).
 
     Args:
         agent: Agent name (codex, claude, gemini)
         session_id: Explicit session ID to resume
-        use_pimono: If True, use PiMonoBackend (pi-mono-rust) for the resumed session
+        use_pimono: If True, use PiMonoBackend (pi-mono-rust); if False, use legacy;
+            if None (default), auto-select PiMonoBackend for claude/codex.
     """
 
     agent = _default_agent_name(agent)

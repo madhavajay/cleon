@@ -34,7 +34,7 @@
 1. ~~Run live API tests with Claude and Codex providers~~ ✅ DONE
 2. ~~Test Gemini provider via PiMonoBackend~~ ⏸️ Token expired, code ready
 3. ~~Validate session resume across kernel restarts~~ ✅ DONE
-4. Enable PiMonoBackend by default (remove use_pimono flag requirement)
+4. ~~Enable PiMonoBackend by default (remove use_pimono flag requirement)~~ ✅ DONE
 5. Clean up legacy backends once PiMonoBackend is stable
 
 ### Build Instructions
