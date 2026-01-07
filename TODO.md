@@ -127,6 +127,28 @@ PIMONO_LIVE_TEST=1 python -m pytest python/tests/test_pimono_backend.py -v
 - [ ] pi-mono-rust PyO3 bindings need tool support (basic chat mode only currently)
 - [ ] Approval flow: magic.py calls `_prompt_approval()` but callback is not wired
 
+**Implementation Requirements (analyzed 2026-01-07):**
+
+To implement approval hooks, changes are needed in two places:
+
+1. **pi-mono-rust Agent core** (`pi-mono-rust/src/agent/mod.rs`):
+   - Add an `on_approval` callback to `AgentOptions`
+   - Modify `execute_tool_calls()` to emit approval request before execution
+   - Wait for approval response (approve/deny/abort) before proceeding
+   - This requires async/sync flow changes since current tool execution is synchronous
+
+2. **PyO3 bindings** (`pi-mono-rust/src/python/mod.rs`):
+   - Expose approval callback mechanism to Python
+   - `PyAgentSession::prompt()` would need to handle async approval requests
+
+3. **PiMonoBackend** (`python/src/cleon/backend.py`):
+   - Wire `on_approval` Python callback through PyO3 to Rust
+
+**Why this is complex:**
+- pi-mono-rust's `execute_tool_calls()` runs synchronously inside the agent loop
+- Approval requires pausing execution and waiting for user input
+- This would need either async/await support or a channel-based approach
+
 This is not blocking the migration since:
 1. Basic chat and tool streaming work (events flow to Jupyter)
 2. pi-mono-rust handles tool execution internally
